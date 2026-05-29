@@ -3,11 +3,13 @@ import { useState, useEffect, useRef, useCallback } from "react";
 // ── Config keys ────────────────────────────────────────────────
 const LS_URL  = 'wr_script_url';
 const LS_PASS = 'wr_admin_pass';
+const DEFAULT_SCRIPT_URL = import.meta.env.VITE_APPS_SCRIPT_URL || '';
 
 // ── API ────────────────────────────────────────────────────────
 const API = {
-  getUrl: () => localStorage.getItem(LS_URL) || '',
+  getUrl: () => localStorage.getItem(LS_URL) || DEFAULT_SCRIPT_URL,
   setUrl: (u) => localStorage.setItem(LS_URL, u),
+  hasDefaultUrl: () => Boolean(DEFAULT_SCRIPT_URL),
 
   async load() {
     const url = this.getUrl();
@@ -972,6 +974,10 @@ function SettingsTab({ adminPass, setAdminPass, showToast, setView }) {
   const resetUrl = () => {
     if (!confirm('確定要重新設定 Apps Script 網址？')) return;
     localStorage.removeItem(LS_URL);
+    if (API.hasDefaultUrl()) {
+      location.reload();
+      return;
+    }
     setView('setup');
   };
 
