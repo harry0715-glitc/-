@@ -34,23 +34,41 @@ const API = {
   },
 };
 
-// ── Image compressor ────────────────────────────────────────────
-const compressImage = (file, maxW = 480, q = 0.72) =>
-  new Promise(res => {
+// ── Browser + image helpers ─────────────────────────────────────
+const isInAppBrowser = () => {
+  const ua = navigator.userAgent || '';
+  return /Line|FBAN|FBAV|Instagram|Messenger|MicroMessenger/i.test(ua);
+};
+
+const readImageFile = (file) =>
+  new Promise((resolve, reject) => {
     const reader = new FileReader();
-    reader.onload = e => {
-      const img = new Image();
-      img.onload = () => {
-        let [w, h] = [img.width, img.height];
-        if (w > maxW) { h = Math.round(h * maxW / w); w = maxW; }
-        const cvs = document.createElement('canvas');
-        [cvs.width, cvs.height] = [w, h];
-        cvs.getContext('2d').drawImage(img, 0, 0, w, h);
-        res(cvs.toDataURL('image/jpeg', q));
-      };
-      img.src = e.target.result;
-    };
+    reader.onload = e => resolve(e.target.result);
+    reader.onerror = reject;
     reader.readAsDataURL(file);
+  });
+
+const cropImage = (src, crop, outW = 480, outH = 560, q = 0.78) =>
+  new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => {
+      const cvs = document.createElement('canvas');
+      cvs.width = outW;
+      cvs.height = outH;
+      const ctx = cvs.getContext('2d');
+      ctx.fillStyle = '#0f172a';
+      ctx.fillRect(0, 0, outW, outH);
+      ctx.save();
+      ctx.translate(outW / 2 + crop.x * 1.6, outH / 2 + crop.y * 1.6);
+      ctx.scale(crop.scale, crop.scale);
+      const cover = Math.max(outW / img.width, outH / img.height);
+      ctx.scale(cover, cover);
+      ctx.drawImage(img, -img.width / 2, -img.height / 2);
+      ctx.restore();
+      resolve(cvs.toDataURL('image/jpeg', q));
+    };
+    img.onerror = reject;
+    img.src = src;
   });
 
 // ── Icons ──────────────────────────────────────────────────────
@@ -107,6 +125,134 @@ function Toast({ msg, type, visible }) {
       <div className={`px-5 py-3 rounded-2xl text-sm font-semibold shadow-2xl flex items-center gap-2 ${type === 'success' ? 'bg-emerald-500 text-white' : 'bg-red-500 text-white'}`}>
         <Icon name={type === 'success' ? 'check' : 'warning'} cls="w-4 h-4" />
         {msg}
+      </div>
+    </div>
+  );
+}
+
+function InAppBrowserNotice({ showToast }) {
+  if (!isInAppBrowser()) return null;
+
+  const copyLink = async () => {
+    try {
+      await navigator.clipboard.writeText(location.href);
+      showToast('網址已複製，請貼到 Chrome 或 Safari 開啟');
+    } catch {
+      showToast('請長按網址複製後，用外部瀏覽器開啟', 'error');
+    }
+  };
+
+  return (
+    <div className="bg-amber-500/10 border border-amber-500/30 rounded-xl p-3 mb-4">
+      <div className="flex items-start gap-2.5">
+        <Icon name="warning" cls="w-5 h-5 text-amber-400 flex-shrink-0 mt-0.5" />
+        <div className="flex-1">
+          <p className="text-amber-200 text-sm font-bold">目前在通訊軟體內建瀏覽器中</p>
+          <p className="text-amber-200/70 text-xs leading-relaxed mt-1">LINE 等內建瀏覽器可能擋住拍照權限。請用右上角選單改用 Chrome / Safari 開啟，或複製網址後貼到瀏覽器。</p>
+          <button onClick={copyLink}
+            className="mt-3 bg-amber-500/20 border border-amber-400/30 text-amber-200 rounded-lg px-3 py-2 text-xs font-bold">
+            複製網址
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function PhotoCropper({ src, onCancel, onDone, showToast }) {
+  const [crop, setCrop] = useState({ scale: 1.15, x: 0, y: -8 });
+  const [drag, setDrag] = useState(null);
+
+  const update = (key) => (e) => {
+    const value = Number(e.target.value);
+    setCrop(c => ({ ...c, [key]: value }));
+  };
+
+  const startDrag = (e) => {
+    const point = e.touches?.[0] || e;
+    setDrag({ px: point.clientX, py: point.clientY, x: crop.x, y: crop.y });
+  };
+
+  const moveDrag = (e) => {
+    if (!drag) return;
+    const point = e.touches?.[0] || e;
+    setCrop(c => ({
+      ...c,
+      x: Math.max(-90, Math.min(90, drag.x + point.clientX - drag.px)),
+      y: Math.max(-110, Math.min(110, drag.y + point.clientY - drag.py)),
+    }));
+  };
+
+  const finish = async () => {
+    try {
+      const cropped = await cropImage(src, crop);
+      onDone(cropped);
+      showToast('照片已裁切');
+    } catch {
+      showToast('照片裁切失敗，請重新選取', 'error');
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-40 bg-slate-950 flex flex-col">
+      <div className="px-4 pt-12 pb-4 border-b border-slate-800">
+        <button onClick={onCancel} className="flex items-center gap-1.5 text-slate-400 text-sm mb-3">
+          <Icon name="back" cls="w-4 h-4" /> 取消
+        </button>
+        <h2 className="text-xl font-black text-white">裁切人員照片</h2>
+        <p className="text-slate-500 text-xs mt-1">讓臉部位在框線中間，肩膀保留一點空間</p>
+      </div>
+
+      <div className="flex-1 flex flex-col justify-center px-4 py-5">
+        <div className="mx-auto w-full max-w-[320px]">
+          <div
+            className="relative mx-auto w-full aspect-[6/7] overflow-hidden rounded-2xl bg-slate-900 border border-slate-700 touch-none"
+            onMouseDown={startDrag}
+            onMouseMove={moveDrag}
+            onMouseUp={() => setDrag(null)}
+            onMouseLeave={() => setDrag(null)}
+            onTouchStart={startDrag}
+            onTouchMove={moveDrag}
+            onTouchEnd={() => setDrag(null)}
+          >
+            <img
+              src={src}
+              alt="crop preview"
+              className="absolute left-1/2 top-1/2 min-w-full min-h-full max-w-none select-none"
+              draggable="false"
+              style={{
+                transform: `translate(calc(-50% + ${crop.x}px), calc(-50% + ${crop.y}px)) scale(${crop.scale})`,
+              }}
+            />
+            <div className="absolute inset-x-[18%] top-[16%] h-[44%] rounded-full border-2 border-white/80 shadow-[0_0_0_999px_rgb(2_6_23/0.35)]" />
+            <div className="absolute inset-0 border-4 border-slate-950/20 pointer-events-none" />
+          </div>
+
+          <div className="mt-5 space-y-4">
+            <label className="block">
+              <span className="text-xs font-bold text-slate-500">臉部大小</span>
+              <input type="range" min="1" max="2.4" step="0.01" value={crop.scale} onChange={update('scale')}
+                className="w-full accent-orange-500" />
+            </label>
+            <label className="block">
+              <span className="text-xs font-bold text-slate-500">左右位置</span>
+              <input type="range" min="-90" max="90" step="1" value={crop.x} onChange={update('x')}
+                className="w-full accent-orange-500" />
+            </label>
+            <label className="block">
+              <span className="text-xs font-bold text-slate-500">上下位置</span>
+              <input type="range" min="-110" max="110" step="1" value={crop.y} onChange={update('y')}
+                className="w-full accent-orange-500" />
+            </label>
+          </div>
+        </div>
+      </div>
+
+      <div className="border-t border-slate-800 p-4 bg-slate-950">
+        <button onClick={finish}
+          className="w-full bg-gradient-to-r from-orange-600 to-amber-500 text-white rounded-2xl py-4 font-bold active:scale-95 transition-all">
+          確認裁切
+        </button>
       </div>
     </div>
   );
@@ -406,6 +552,7 @@ function RegisterView({ setView, contractors, onAddWorker, showToast }) {
     entryDate: new Date().toISOString().split('T')[0], notes: ''
   });
   const [photo, setPhoto] = useState(null);
+  const [cropSource, setCropSource] = useState(null);
   const [saving, setSaving] = useState(false);
   const [done, setDone] = useState(false);
   const [errors, setErrors] = useState({});
@@ -426,10 +573,14 @@ function RegisterView({ setView, contractors, onAddWorker, showToast }) {
 
   const handlePhoto = async (e) => {
     const file = e.target.files?.[0];
+    e.target.value = '';
     if (!file) return;
-    const compressed = await compressImage(file);
-    setPhoto(compressed);
-    showToast('照片已選取');
+    if (!file.type.startsWith('image/')) {
+      showToast('請選擇圖片檔', 'error');
+      return;
+    }
+    const dataUrl = await readImageFile(file);
+    setCropSource(dataUrl);
   };
 
   const handleSubmit = async () => {
@@ -479,6 +630,17 @@ function RegisterView({ setView, contractors, onAddWorker, showToast }) {
 
   return (
     <div className="min-h-screen bg-slate-950">
+      {cropSource && (
+        <PhotoCropper
+          src={cropSource}
+          showToast={showToast}
+          onCancel={() => setCropSource(null)}
+          onDone={(cropped) => {
+            setPhoto(cropped);
+            setCropSource(null);
+          }}
+        />
+      )}
       <div className="sticky top-0 z-10 bg-slate-950/90 backdrop-blur px-4 pt-12 pb-4 border-b border-slate-800/60">
         <button onClick={() => setView('home')} className="flex items-center gap-1.5 text-slate-400 text-sm mb-3 hover:text-white transition-colors">
           <Icon name="back" cls="w-4 h-4" /> 返回
@@ -488,6 +650,8 @@ function RegisterView({ setView, contractors, onAddWorker, showToast }) {
       </div>
 
       <div className="px-4 py-5 pb-32 space-y-5">
+        <InAppBrowserNotice showToast={showToast} />
+
         {/* Photo */}
         <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4">
           <div className="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-3">人員照片</div>
