@@ -131,9 +131,8 @@ function Toast({ msg, type, visible }) {
   );
 }
 
-function InAppBrowserNotice({ showToast }) {
-  if (!isInAppBrowser()) return null;
-
+function CameraOpenHelp({ show, onClose, showToast }) {
+  if (!show) return null;
   const copyLink = async () => {
     try {
       await navigator.clipboard.writeText(location.href);
@@ -143,16 +142,41 @@ function InAppBrowserNotice({ showToast }) {
     }
   };
 
+  const openExternal = () => {
+    const href = location.href;
+    if (/Android/i.test(navigator.userAgent) && /^https?:\/\//.test(href)) {
+      const scheme = location.protocol.replace(':', '');
+      const cleanUrl = href.replace(/^https?:\/\//, '');
+      location.href = `intent://${cleanUrl}#Intent;scheme=${scheme};action=android.intent.action.VIEW;category=android.intent.category.BROWSABLE;end`;
+      return;
+    }
+    window.open(href, '_blank', 'noopener,noreferrer');
+  };
+
   return (
-    <div className="bg-amber-500/10 border border-amber-500/30 rounded-xl p-3 mb-4">
-      <div className="flex items-start gap-2.5">
-        <Icon name="warning" cls="w-5 h-5 text-amber-400 flex-shrink-0 mt-0.5" />
-        <div className="flex-1">
-          <p className="text-amber-200 text-sm font-bold">目前在通訊軟體內建瀏覽器中</p>
-          <p className="text-amber-200/70 text-xs leading-relaxed mt-1">LINE 等內建瀏覽器可能擋住拍照權限。請用右上角選單改用 Chrome / Safari 開啟，或複製網址後貼到瀏覽器。</p>
+    <div className="fixed inset-0 z-50 bg-slate-950/85 backdrop-blur-sm flex items-center justify-center p-5">
+      <div className="w-full max-w-sm bg-slate-900 border border-amber-500/30 rounded-2xl p-5 shadow-2xl">
+        <div className="w-12 h-12 bg-amber-500/10 border border-amber-500/30 rounded-xl flex items-center justify-center mb-4">
+          <Icon name="warning" cls="w-6 h-6 text-amber-400" />
+        </div>
+        <h2 className="text-white font-black text-xl">相機沒有開啟</h2>
+        <p className="text-slate-400 text-sm leading-relaxed mt-2">
+          {isInAppBrowser()
+            ? 'LINE 等內建瀏覽器可能擋住拍照權限。請改用外部瀏覽器開啟，或複製網址貼到 Chrome / Safari。'
+            : '目前瀏覽器沒有喚起相機。請確認相機權限，或改用外部瀏覽器開啟。'}
+        </p>
+        <div className="space-y-2 mt-5">
+          <button onClick={openExternal}
+            className="w-full bg-gradient-to-r from-orange-600 to-amber-500 text-white rounded-xl py-3 font-bold">
+            用外部瀏覽器開啟
+          </button>
           <button onClick={copyLink}
-            className="mt-3 bg-amber-500/20 border border-amber-400/30 text-amber-200 rounded-lg px-3 py-2 text-xs font-bold">
-            複製網址
+            className="w-full bg-slate-800 border border-slate-700 text-slate-200 rounded-xl py-3 font-bold">
+            複製連結
+          </button>
+          <button onClick={onClose}
+            className="w-full text-slate-500 py-2 text-sm">
+            返回
           </button>
         </div>
       </div>
@@ -589,12 +613,14 @@ function RegisterView({ setView, contractors, onAddWorker, showToast }) {
   });
   const [photo, setPhoto] = useState(null);
   const [cropSource, setCropSource] = useState(null);
+  const [cameraHelp, setCameraHelp] = useState(false);
   const [saving, setSaving] = useState(false);
   const [done, setDone] = useState(false);
   const [errors, setErrors] = useState({});
   const [savedPhotoUrl, setSavedPhotoUrl] = useState('');
   const cameraRef = useRef();
   const galleryRef = useRef();
+  const cameraAttemptRef = useRef(0);
 
   const set = k => e => setForm(f => ({ ...f, [k]: e.target.value }));
 
@@ -608,6 +634,8 @@ function RegisterView({ setView, contractors, onAddWorker, showToast }) {
   };
 
   const handlePhoto = async (e) => {
+    cameraAttemptRef.current = 0;
+    setCameraHelp(false);
     const file = e.target.files?.[0];
     e.target.value = '';
     if (!file) return;
@@ -617,6 +645,43 @@ function RegisterView({ setView, contractors, onAddWorker, showToast }) {
     }
     const dataUrl = await readImageFile(file);
     setCropSource(dataUrl);
+  };
+
+  const openCamera = () => {
+    const input = cameraRef.current;
+    if (!input) {
+      setCameraHelp(true);
+      return;
+    }
+
+    setCameraHelp(false);
+    const attempt = Date.now();
+    let openedPicker = false;
+    cameraAttemptRef.current = attempt;
+
+    const markOpened = () => { openedPicker = true; };
+    const markHidden = () => {
+      if (document.visibilityState === 'hidden') openedPicker = true;
+    };
+
+    window.addEventListener('blur', markOpened, { once: true });
+    document.addEventListener('visibilitychange', markHidden);
+
+    try {
+      input.click();
+    } catch {
+      window.removeEventListener('blur', markOpened);
+      document.removeEventListener('visibilitychange', markHidden);
+      setCameraHelp(true);
+      return;
+    }
+
+    setTimeout(() => {
+      window.removeEventListener('blur', markOpened);
+      document.removeEventListener('visibilitychange', markHidden);
+      const noCameraOpened = !openedPicker && document.visibilityState === 'visible';
+      if (cameraAttemptRef.current === attempt && noCameraOpened) setCameraHelp(true);
+    }, 900);
   };
 
   const handleSubmit = async () => {
@@ -666,6 +731,7 @@ function RegisterView({ setView, contractors, onAddWorker, showToast }) {
 
   return (
     <div className="min-h-screen bg-slate-950">
+      <CameraOpenHelp show={cameraHelp} onClose={() => setCameraHelp(false)} showToast={showToast} />
       {cropSource && (
         <PhotoCropper
           src={cropSource}
@@ -686,8 +752,6 @@ function RegisterView({ setView, contractors, onAddWorker, showToast }) {
       </div>
 
       <div className="px-4 py-5 pb-32 space-y-5">
-        <InAppBrowserNotice showToast={showToast} />
-
         {/* Photo */}
         <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4">
           <div className="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-3">人員照片</div>
@@ -699,7 +763,7 @@ function RegisterView({ setView, contractors, onAddWorker, showToast }) {
             <div className="flex-1 space-y-2">
               <input ref={cameraRef} type="file" accept="image/*" capture="environment" className="hidden" onChange={handlePhoto} />
               <input ref={galleryRef} type="file" accept="image/*" className="hidden" onChange={handlePhoto} />
-              <button onClick={() => cameraRef.current?.click()}
+              <button onClick={openCamera}
                 className="w-full bg-orange-600/20 border border-orange-500/40 text-orange-400 rounded-xl py-2.5 text-sm font-semibold flex items-center justify-center gap-2 active:scale-95 transition-all">
                 <Icon name="camera" cls="w-4 h-4" /> 拍照
               </button>
