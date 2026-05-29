@@ -243,7 +243,7 @@ function PhotoCropper({ src, onCancel, onDone, showToast }) {
           <Icon name="back" cls="w-4 h-4" /> 取消
         </button>
         <h2 className="text-xl font-black text-white">裁切人員照片</h2>
-        <p className="text-slate-500 text-xs mt-1">2 吋大頭照比例 35 x 45 mm</p>
+        <p className="text-slate-500 text-xs mt-1">2 吋大頭照 3.5 x 4.5 cm，臉部約佔 70-80%</p>
       </div>
 
       <div className="flex-1 flex flex-col justify-center px-4 py-5">
@@ -271,12 +271,16 @@ function PhotoCropper({ src, onCancel, onDone, showToast }) {
                 transformOrigin: 'center',
               }}
             />
-            <div className="absolute inset-0 border-2 border-dashed border-white/90 rounded-xl pointer-events-none" />
-            <div className="absolute left-1/2 top-[18%] h-[34%] aspect-[3/4] -translate-x-1/2 rounded-full border border-white/45 pointer-events-none" />
-            <div className="absolute left-[16%] right-[16%] top-[62%] border-t border-dashed border-white/35 pointer-events-none" />
-            <div className="absolute inset-0 shadow-[inset_0_0_0_999px_rgb(2_6_23/0.08)] pointer-events-none" />
+            <div className="absolute inset-0 border-2 border-white/90 rounded-xl pointer-events-none" />
+            <div className="absolute inset-x-[4%] inset-y-[4%] border border-dashed border-white/55 pointer-events-none" />
+            <div className="absolute left-1/2 top-[8%] h-[76%] aspect-[8/9] -translate-x-1/2 rounded-[48%] border-2 border-dashed border-white/80 pointer-events-none" />
+            <div className="absolute left-[12%] right-[12%] top-[8%] border-t border-dashed border-white/45 pointer-events-none" />
+            <div className="absolute left-[12%] right-[12%] top-[84%] border-t border-dashed border-white/45 pointer-events-none" />
+            <div className="absolute left-[18%] right-[18%] top-[70%] border-t border-dashed border-white/35 pointer-events-none" />
+            <div className="absolute left-1/2 top-[8%] h-[76%] border-l border-dashed border-white/30 pointer-events-none" />
+            <div className="absolute inset-0 shadow-[inset_0_0_0_999px_rgb(2_6_23/0.05)] pointer-events-none" />
           </div>
-          <p className="text-center text-slate-500 text-xs mt-3">拖曳照片調整位置，兩指縮放大小</p>
+          <p className="text-center text-slate-500 text-xs mt-3">拖曳照片，讓頭頂與下巴落在虛線臉框內</p>
         </div>
       </div>
 
