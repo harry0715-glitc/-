@@ -48,7 +48,7 @@ const readImageFile = (file) =>
     reader.readAsDataURL(file);
   });
 
-const cropImage = (src, crop, outW = 480, outH = 560, q = 0.78) =>
+const cropImage = (src, crop, preview, outW = 420, outH = 540, q = 0.82) =>
   new Promise((resolve, reject) => {
     const img = new Image();
     img.onload = () => {
@@ -58,11 +58,12 @@ const cropImage = (src, crop, outW = 480, outH = 560, q = 0.78) =>
       const ctx = cvs.getContext('2d');
       ctx.fillStyle = '#0f172a';
       ctx.fillRect(0, 0, outW, outH);
+      const px = preview?.width || outW;
+      const py = preview?.height || outH;
       ctx.save();
-      ctx.translate(outW / 2 + crop.x * 1.6, outH / 2 + crop.y * 1.6);
-      ctx.scale(crop.scale, crop.scale);
       const cover = Math.max(outW / img.width, outH / img.height);
-      ctx.scale(cover, cover);
+      ctx.translate(outW / 2 + crop.x * outW / px, outH / 2 + crop.y * outH / py);
+      ctx.scale(cover * crop.scale, cover * crop.scale);
       ctx.drawImage(img, -img.width / 2, -img.height / 2);
       ctx.restore();
       resolve(cvs.toDataURL('image/jpeg', q));
@@ -160,32 +161,74 @@ function InAppBrowserNotice({ showToast }) {
 }
 
 function PhotoCropper({ src, onCancel, onDone, showToast }) {
-  const [crop, setCrop] = useState({ scale: 1.15, x: 0, y: -8 });
-  const [drag, setDrag] = useState(null);
+  const [crop, setCrop] = useState({ scale: 1.08, x: 0, y: 0 });
+  const frameRef = useRef(null);
+  const gestureRef = useRef(null);
 
-  const update = (key) => (e) => {
-    const value = Number(e.target.value);
-    setCrop(c => ({ ...c, [key]: value }));
+  const clampCrop = (next) => ({
+    scale: Math.max(1, Math.min(3.2, next.scale)),
+    x: Math.max(-180, Math.min(180, next.x)),
+    y: Math.max(-220, Math.min(220, next.y)),
+  });
+
+  const distance = (a, b) => Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY);
+  const midpoint = (a, b) => ({ x: (a.clientX + b.clientX) / 2, y: (a.clientY + b.clientY) / 2 });
+
+  const startGesture = (e) => {
+    if (e.touches?.length >= 2) {
+      const center = midpoint(e.touches[0], e.touches[1]);
+      gestureRef.current = {
+        type: 'pinch',
+        dist: distance(e.touches[0], e.touches[1]),
+        cx: center.x,
+        cy: center.y,
+        scale: crop.scale,
+        x: crop.x,
+        y: crop.y,
+      };
+      return;
+    }
+
+    const point = e.touches?.[0] || e;
+    gestureRef.current = { type: 'pan', px: point.clientX, py: point.clientY, x: crop.x, y: crop.y };
   };
 
-  const startDrag = (e) => {
-    const point = e.touches?.[0] || e;
-    setDrag({ px: point.clientX, py: point.clientY, x: crop.x, y: crop.y });
-  };
+  const moveGesture = (e) => {
+    const gesture = gestureRef.current;
+    if (!gesture) return;
+    if (e.cancelable) e.preventDefault();
 
-  const moveDrag = (e) => {
-    if (!drag) return;
+    if (e.touches?.length >= 2 && gesture.type === 'pinch') {
+      const center = midpoint(e.touches[0], e.touches[1]);
+      const ratio = distance(e.touches[0], e.touches[1]) / Math.max(1, gesture.dist);
+      setCrop(clampCrop({
+        scale: gesture.scale * ratio,
+        x: gesture.x + center.x - gesture.cx,
+        y: gesture.y + center.y - gesture.cy,
+      }));
+      return;
+    }
+
     const point = e.touches?.[0] || e;
-    setCrop(c => ({
+    setCrop(c => clampCrop({
       ...c,
-      x: Math.max(-90, Math.min(90, drag.x + point.clientX - drag.px)),
-      y: Math.max(-110, Math.min(110, drag.y + point.clientY - drag.py)),
+      x: gesture.x + point.clientX - gesture.px,
+      y: gesture.y + point.clientY - gesture.py,
     }));
   };
 
+  const zoomWheel = (e) => {
+    e.preventDefault();
+    const nextScale = crop.scale + (e.deltaY > 0 ? -0.06 : 0.06);
+    setCrop(c => clampCrop({ ...c, scale: nextScale }));
+  };
+
+  const endGesture = () => { gestureRef.current = null; };
+
   const finish = async () => {
     try {
-      const cropped = await cropImage(src, crop);
+      const rect = frameRef.current?.getBoundingClientRect();
+      const cropped = await cropImage(src, crop, rect);
       onDone(cropped);
       showToast('照片已裁切');
     } catch {
@@ -200,51 +243,40 @@ function PhotoCropper({ src, onCancel, onDone, showToast }) {
           <Icon name="back" cls="w-4 h-4" /> 取消
         </button>
         <h2 className="text-xl font-black text-white">裁切人員照片</h2>
-        <p className="text-slate-500 text-xs mt-1">讓臉部位在框線中間，肩膀保留一點空間</p>
+        <p className="text-slate-500 text-xs mt-1">2 吋大頭照比例 35 x 45 mm</p>
       </div>
 
       <div className="flex-1 flex flex-col justify-center px-4 py-5">
-        <div className="mx-auto w-full max-w-[320px]">
+        <div className="mx-auto w-full max-w-[300px]">
           <div
-            className="relative mx-auto w-full aspect-[6/7] overflow-hidden rounded-2xl bg-slate-900 border border-slate-700 touch-none"
-            onMouseDown={startDrag}
-            onMouseMove={moveDrag}
-            onMouseUp={() => setDrag(null)}
-            onMouseLeave={() => setDrag(null)}
-            onTouchStart={startDrag}
-            onTouchMove={moveDrag}
-            onTouchEnd={() => setDrag(null)}
+            ref={frameRef}
+            className="relative mx-auto w-full aspect-[7/9] overflow-hidden rounded-xl bg-slate-900 touch-none cursor-grab active:cursor-grabbing"
+            onMouseDown={startGesture}
+            onMouseMove={moveGesture}
+            onMouseUp={endGesture}
+            onMouseLeave={endGesture}
+            onWheel={zoomWheel}
+            onTouchStart={startGesture}
+            onTouchMove={moveGesture}
+            onTouchEnd={endGesture}
+            onTouchCancel={endGesture}
           >
             <img
               src={src}
               alt="crop preview"
-              className="absolute left-1/2 top-1/2 min-w-full min-h-full max-w-none select-none"
+              className="absolute inset-0 w-full h-full object-cover max-w-none select-none"
               draggable="false"
               style={{
-                transform: `translate(calc(-50% + ${crop.x}px), calc(-50% + ${crop.y}px)) scale(${crop.scale})`,
+                transform: `translate(${crop.x}px, ${crop.y}px) scale(${crop.scale})`,
+                transformOrigin: 'center',
               }}
             />
-            <div className="absolute inset-x-[18%] top-[16%] h-[44%] rounded-full border-2 border-white/80 shadow-[0_0_0_999px_rgb(2_6_23/0.35)]" />
-            <div className="absolute inset-0 border-4 border-slate-950/20 pointer-events-none" />
+            <div className="absolute inset-0 border-2 border-dashed border-white/90 rounded-xl pointer-events-none" />
+            <div className="absolute left-1/2 top-[18%] h-[34%] aspect-[3/4] -translate-x-1/2 rounded-full border border-white/45 pointer-events-none" />
+            <div className="absolute left-[16%] right-[16%] top-[62%] border-t border-dashed border-white/35 pointer-events-none" />
+            <div className="absolute inset-0 shadow-[inset_0_0_0_999px_rgb(2_6_23/0.08)] pointer-events-none" />
           </div>
-
-          <div className="mt-5 space-y-4">
-            <label className="block">
-              <span className="text-xs font-bold text-slate-500">臉部大小</span>
-              <input type="range" min="1" max="2.4" step="0.01" value={crop.scale} onChange={update('scale')}
-                className="w-full accent-orange-500" />
-            </label>
-            <label className="block">
-              <span className="text-xs font-bold text-slate-500">左右位置</span>
-              <input type="range" min="-90" max="90" step="1" value={crop.x} onChange={update('x')}
-                className="w-full accent-orange-500" />
-            </label>
-            <label className="block">
-              <span className="text-xs font-bold text-slate-500">上下位置</span>
-              <input type="range" min="-110" max="110" step="1" value={crop.y} onChange={update('y')}
-                className="w-full accent-orange-500" />
-            </label>
-          </div>
+          <p className="text-center text-slate-500 text-xs mt-3">拖曳照片調整位置，兩指縮放大小</p>
         </div>
       </div>
 
