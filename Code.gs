@@ -63,6 +63,30 @@ function validateAdminSecret_(value) {
   return String(value || '').length >= 6;
 }
 
+function normalizeText_(value) {
+  return String(value || '').trim().replace(/\s+/g, ' ');
+}
+
+function normalizeIdNumber_(value) {
+  return normalizeText_(value).toUpperCase().replace(/\s+/g, '');
+}
+
+function normalizePhone_(value) {
+  return String(value || '').replace(/\D/g, '').slice(0, 10);
+}
+
+function normalizeNotes_(value) {
+  return normalizeText_(value);
+}
+
+function validateIdNumber_(value) {
+  return !value || /^[A-Z][0-9]{9}$/.test(value);
+}
+
+function validatePhone_(value) {
+  return !value || /^09\d{8}$/.test(value);
+}
+
 function requireAdmin_(secret) {
   const saved = getAdminSecret_();
   if (!saved) throw new Error('尚未建立管理者密碼');
@@ -183,6 +207,93 @@ function deleteRowById(sheet, id) {
   return false;
 }
 
+function findContractorById_(contractors, contractorId) {
+  return contractors.find(c => String(c.id) === String(contractorId)) || null;
+}
+
+function findDuplicateContractorByName_(contractors, name) {
+  const target = normalizeText_(name).toLowerCase();
+  if (!target) return null;
+  return contractors.find(c => normalizeText_(c.name).toLowerCase() === target) || null;
+}
+
+function findDuplicateWorker_(workers, payload) {
+  const idNumber = normalizeIdNumber_(payload.idNumber);
+  if (idNumber) {
+    const idMatch = workers.find(worker => normalizeIdNumber_(worker.idNumber) === idNumber);
+    if (idMatch) return { type: 'idNumber', worker: idMatch };
+  }
+
+  const contractorId = String(payload.contractorId || '').trim();
+  const name = normalizeText_(payload.name).toLowerCase();
+  const phone = normalizePhone_(payload.phone);
+  if (!contractorId || !name || !phone) return null;
+
+  const profileMatch = workers.find(worker => {
+    if (String(worker.contractorId || '').trim() !== contractorId) return false;
+    if (normalizeText_(worker.name).toLowerCase() !== name) return false;
+    return normalizePhone_(worker.phone) === phone;
+  });
+
+  return profileMatch ? { type: 'profile', worker: profileMatch } : null;
+}
+
+function sanitizeContractorPayload_(p, contractors) {
+  const name = normalizeText_(p.name);
+  if (!name) throw new Error('請輸入包商名稱');
+  if (name.length > 60) throw new Error('包商名稱過長');
+  if (findDuplicateContractorByName_(contractors, name)) throw new Error('已有相同名稱的包商');
+
+  return {
+    id: String(p.id || Date.now()),
+    name,
+    createdAt: p.createdAt || new Date().toISOString()
+  };
+}
+
+function sanitizeWorkerPayload_(p, contractors, workers) {
+  const name = normalizeText_(p.name);
+  const jobTitle = normalizeText_(p.jobTitle);
+  const contractorId = String(p.contractorId || '').trim();
+  const idNumber = normalizeIdNumber_(p.idNumber);
+  const phone = normalizePhone_(p.phone);
+  const notes = normalizeNotes_(p.notes);
+  const entryDate = normalizeText_(p.entryDate);
+
+  if (!name) throw new Error('請填寫姓名');
+  if (!jobTitle) throw new Error('請填寫工作職稱');
+  if (!contractorId) throw new Error('請選擇所屬包商');
+  if (name.length > 30) throw new Error('姓名過長');
+  if (jobTitle.length > 30) throw new Error('工作職稱過長');
+  if (notes.length > 200) throw new Error('備註請限制在 200 字內');
+  if (!validateIdNumber_(idNumber)) throw new Error('身分證字號格式不正確');
+  if (!validatePhone_(phone)) throw new Error('手機號碼格式不正確');
+
+  const contractor = findContractorById_(contractors, contractorId);
+  if (!contractor) throw new Error('找不到所屬包商');
+
+  const duplicate = findDuplicateWorker_(workers, { name, contractorId, idNumber, phone });
+  if (duplicate) {
+    throw new Error(duplicate.type === 'idNumber'
+      ? '此身分證字號已存在，請確認是否重複登記'
+      : '同包商下已有相同姓名與手機的人員資料');
+  }
+
+  return {
+    id: String(p.id || Date.now()),
+    name,
+    idNumber,
+    phone,
+    jobTitle,
+    contractorId,
+    contractorName: contractor.name,
+    entryDate,
+    notes,
+    photo: p.photo || '',
+    createdAt: p.createdAt || new Date().toISOString()
+  };
+}
+
 /* ── getData ──────────────────────────────────────────────── */
 
 function getData() {
@@ -198,16 +309,29 @@ function getData() {
 function addContractor(p) {
   requireAdmin_(p._adminSecret);
   const ss = getDb();
-  ss.getSheetByName('包商').appendRow([p.id, p.name, p.createdAt]);
+  const contractorsSheet = ss.getSheetByName('包商');
+  const contractors = readSheet(contractorsSheet);
+  const payload = sanitizeContractorPayload_(p, contractors);
+
+  contractorsSheet.appendRow([payload.id, payload.name, payload.createdAt]);
   // 建立資料夾 + 名冊 Sheet
-  getContractorFolder(p.name);
-  ensureContractorSheet(p.name);
-  return { ok: true };
+  getContractorFolder(payload.name);
+  ensureContractorSheet(payload.name);
+  return { ok: true, contractor: payload };
 }
 
 function deleteContractor(p) {
   requireAdmin_(p._adminSecret);
-  deleteRowById(getDb().getSheetByName('包商'), p.id);
+  const ss = getDb();
+  const contractorsSheet = ss.getSheetByName('包商');
+  const contractors = readSheet(contractorsSheet);
+  const contractor = findContractorById_(contractors, p.id);
+  if (!contractor) throw new Error('找不到要刪除的包商');
+
+  const workers = readSheet(ss.getSheetByName('人員')).filter(worker => String(worker.contractorId) === String(p.id));
+  if (workers.length > 0) throw new Error(`此包商底下仍有 ${workers.length} 筆人員資料，請先刪除人員資料`);
+
+  deleteRowById(contractorsSheet, p.id);
   return { ok: true };
 }
 
@@ -215,26 +339,25 @@ function deleteContractor(p) {
 
 function addWorker(p) {
   const ss = getDb();
-
-  // 查詢包商名稱
   const contractors = readSheet(ss.getSheetByName('包商'));
-  const co = contractors.find(c => c.id === String(p.contractorId)) || {};
-  const coName = co.name || '';
+  const workersSheet = ss.getSheetByName('人員');
+  const workers = readSheet(workersSheet);
+  const payload = sanitizeWorkerPayload_(p, contractors, workers);
 
   // 儲存照片至 Drive
   let photoUrl = '';
-  if (p.photo) photoUrl = savePhotoToDrive(p, coName);
+  if (payload.photo) photoUrl = savePhotoToDrive(payload, payload.contractorName);
 
   // 寫入主資料庫
-  ss.getSheetByName('人員').appendRow([
-    p.id, p.name, p.idNumber || '', p.phone || '',
-    p.jobTitle, p.contractorId, coName,
-    p.entryDate || '', p.notes || '',
-    photoUrl, p.createdAt
+  workersSheet.appendRow([
+    payload.id, payload.name, payload.idNumber || '', payload.phone || '',
+    payload.jobTitle, payload.contractorId, payload.contractorName,
+    payload.entryDate || '', payload.notes || '',
+    photoUrl, payload.createdAt
   ]);
 
   // 寫入各包商獨立名冊
-  if (coName) appendWorkerToContractorSheet(coName, p, photoUrl);
+  appendWorkerToContractorSheet(payload.contractorName, payload, photoUrl);
 
   return { ok: true, photoUrl };
 }

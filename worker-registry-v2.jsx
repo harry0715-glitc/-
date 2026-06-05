@@ -1,5 +1,17 @@
 import { useState, useEffect, useRef, useCallback } from "react";
-import { ADMIN_USERNAME, isFixedAdminUsername, maskIdNumber, maskPhone, validateAdminSecret } from "./src/security.mjs";
+import {
+  ADMIN_USERNAME,
+  findDuplicateContractor,
+  findDuplicateWorker,
+  isFixedAdminUsername,
+  maskIdNumber,
+  maskPhone,
+  normalizeIdNumber,
+  normalizeNotes,
+  normalizePhone,
+  normalizeText,
+  validateAdminSecret,
+} from "./src/security.mjs";
 
 // ── Config keys ────────────────────────────────────────────────
 const LS_URL = 'wr_script_url';
@@ -635,7 +647,7 @@ function HomeView({ setView, workers, contractors, loadData }) {
 // ══════════════════════════════════════════════════════
 // REGISTER VIEW
 // ══════════════════════════════════════════════════════
-function RegisterView({ setView, contractors, onAddWorker, showToast }) {
+function RegisterView({ setView, contractors, workers, onAddWorker, showToast }) {
   const [form, setForm] = useState({
     name: '', idNumber: '', phone: '', jobTitle: '', contractorId: '',
     entryDate: new Date().toISOString().split('T')[0], notes: ''
@@ -651,7 +663,20 @@ function RegisterView({ setView, contractors, onAddWorker, showToast }) {
   const galleryRef = useRef();
   const cameraAttemptRef = useRef(0);
 
-  const set = k => e => setForm(f => ({ ...f, [k]: e.target.value }));
+  const set = k => e => {
+    let value = e.target.value;
+    if (k === 'name' || k === 'jobTitle') value = normalizeText(value);
+    if (k === 'idNumber') value = normalizeIdNumber(value);
+    if (k === 'phone') value = normalizePhone(value);
+    if (k === 'notes') value = normalizeNotes(value);
+    setForm(f => ({ ...f, [k]: value }));
+    setErrors(current => {
+      if (!current[k]) return current;
+      const next = { ...current };
+      delete next[k];
+      return next;
+    });
+  };
 
   const validate = () => {
     const e = {};
@@ -715,14 +740,29 @@ function RegisterView({ setView, contractors, onAddWorker, showToast }) {
 
   const handleSubmit = async () => {
     if (!validate()) return;
+    const worker = {
+      id: Date.now().toString(),
+      name: normalizeText(form.name),
+      idNumber: normalizeIdNumber(form.idNumber),
+      phone: normalizePhone(form.phone),
+      jobTitle: normalizeText(form.jobTitle),
+      contractorId: String(form.contractorId || '').trim(),
+      entryDate: form.entryDate || '',
+      notes: normalizeNotes(form.notes),
+      photo,
+      createdAt: new Date().toISOString()
+    };
+    const duplicate = findDuplicateWorker(workers, worker);
+    if (duplicate) {
+      const message = duplicate.type === 'idNumber'
+        ? '此身分證字號已存在，請確認是否重複登記'
+        : '同包商下已有相同姓名與手機的人員資料';
+      showToast(message, 'error');
+      return;
+    }
+
     setSaving(true);
     try {
-      const worker = {
-        id: Date.now().toString(),
-        ...form,
-        photo,
-        createdAt: new Date().toISOString()
-      };
       const result = await onAddWorker(worker);
       setSavedPhotoUrl(result?.photoUrl || '');
       setDone(true);
@@ -1188,12 +1228,17 @@ function ContractorsTab({ contractors, onAddContractor, onDeleteContractor, show
   const [saving, setSaving] = useState(false);
 
   const add = async () => {
-    if (!newName.trim()) return;
+    const normalizedName = normalizeText(newName);
+    if (!normalizedName) return;
+    if (findDuplicateContractor(contractors, normalizedName)) {
+      showToast('已有相同名稱的包商，請勿重複新增', 'error');
+      return;
+    }
     setSaving(true);
     try {
-      const co = { id: Date.now().toString(), name: newName.trim(), createdAt: new Date().toISOString() };
+      const co = { id: Date.now().toString(), name: normalizedName, createdAt: new Date().toISOString() };
       await onAddContractor(co);
-      showToast(`已新增「${newName.trim()}」並建立 Drive 資料夾`);
+      showToast(`已新增「${normalizedName}」並建立 Drive 資料夾`);
       setNewName(''); setAdding(false);
     } catch (err) {
       showToast('新增失敗：' + err.message, 'error');
