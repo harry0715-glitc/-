@@ -1,8 +1,9 @@
 import { useState, useEffect, useRef, useCallback } from "react";
+import { ADMIN_USERNAME, isFixedAdminUsername, maskIdNumber, maskPhone, validateAdminSecret } from "./src/security.mjs";
 
 // ── Config keys ────────────────────────────────────────────────
-const LS_URL  = 'wr_script_url';
-const LS_PASS = 'wr_admin_pass';
+const LS_URL = 'wr_script_url';
+const SS_ADMIN_SECRET = 'wr_admin_secret';
 const DEFAULT_SCRIPT_URL = import.meta.env.VITE_APPS_SCRIPT_URL || '';
 
 // ── API ────────────────────────────────────────────────────────
@@ -10,6 +11,9 @@ const API = {
   getUrl: () => localStorage.getItem(LS_URL) || DEFAULT_SCRIPT_URL,
   setUrl: (u) => localStorage.setItem(LS_URL, u),
   hasDefaultUrl: () => Boolean(DEFAULT_SCRIPT_URL),
+  getAdminSecret: () => sessionStorage.getItem(SS_ADMIN_SECRET) || '',
+  setAdminSecret: (secret) => sessionStorage.setItem(SS_ADMIN_SECRET, secret),
+  clearAdminSession: () => sessionStorage.removeItem(SS_ADMIN_SECRET),
 
   async load() {
     const url = this.getUrl();
@@ -23,14 +27,34 @@ const API = {
   async call(action, payload = {}) {
     const url = this.getUrl();
     if (!url) throw new Error('未設定網址');
+    const adminSecret = this.getAdminSecret();
+    const requestPayload = adminSecret && !Object.prototype.hasOwnProperty.call(payload, '_adminSecret')
+      ? { ...payload, _adminSecret: adminSecret }
+      : payload;
     const res = await fetch(url, {
       method: 'POST',
-      body: JSON.stringify({ action, payload }),
+      body: JSON.stringify({ action, payload: requestPayload }),
       redirect: 'follow',
     });
     const json = await res.json();
     if (!json.ok) throw new Error(json.error);
     return json.data;
+  },
+
+  async adminStatus() {
+    return this.call('adminStatus');
+  },
+
+  async authenticateAdmin(username, secret) {
+    return this.call('authenticateAdmin', { username, secret });
+  },
+
+  async bootstrapAdmin(username, secret) {
+    return this.call('bootstrapAdmin', { username, secret });
+  },
+
+  async changeAdminSecret(currentSecret, newSecret) {
+    return this.call('changeAdminSecret', { currentSecret, newSecret });
   },
 };
 
@@ -326,7 +350,6 @@ export default function App() {
   const [contractors, setContractors] = useState([]);
   const [workers, setWorkers] = useState([]);
   const [adminAuth, setAdminAuth] = useState(false);
-  const [adminPass, setAdminPassState] = useState(() => localStorage.getItem(LS_PASS) || '0000');
   const [toast, setToast] = useState({ msg: '', type: 'success', visible: false });
   const [initError, setInitError] = useState('');
 
@@ -349,9 +372,15 @@ export default function App() {
     }
   }, []);
 
-  useEffect(() => { loadData(); }, [loadData]);
+  useEffect(() => {
+    setAdminAuth(Boolean(API.getAdminSecret()));
+    loadData();
+  }, [loadData]);
 
-  const setAdminPass = (p) => { setAdminPassState(p); localStorage.setItem(LS_PASS, p); };
+  const logoutAdmin = () => {
+    API.clearAdminSession();
+    setAdminAuth(false);
+  };
 
   // ── Handlers passed to children ────────────────────
   const handleAddContractor = async (co) => {
@@ -375,7 +404,7 @@ export default function App() {
 
   const shared = {
     setView, contractors, workers, adminAuth, setAdminAuth,
-    adminPass, setAdminPass, showToast, loadData,
+    showToast, loadData, logoutAdmin,
     onAddContractor: handleAddContractor,
     onDeleteContractor: handleDeleteContractor,
     onAddWorker: handleAddWorker,
@@ -900,8 +929,8 @@ function QueryView({ setView, workers, contractors, loadData }) {
 
 function WorkerDetail({ worker: w, contractorName, onBack }) {
   const rows = [
-    { label: '身分證字號', value: w.idNumber || '—' },
-    { label: '手機號碼',   value: w.phone || '—' },
+    { label: '身分證字號', value: w.idNumber ? maskIdNumber(w.idNumber) : '—' },
+    { label: '手機號碼',   value: w.phone ? maskPhone(w.phone) : '—' },
     { label: '所屬包商',   value: contractorName },
     { label: '進場日期',   value: w.entryDate || '—' },
     { label: '備註',       value: w.notes || '—' },
@@ -948,45 +977,160 @@ function WorkerDetail({ worker: w, contractorName, onBack }) {
 // ══════════════════════════════════════════════════════
 // ADMIN LOGIN
 // ══════════════════════════════════════════════════════
-function AdminLoginView({ adminPass, setAdminAuth, setView, adminAuth }) {
-  const [input, setInput] = useState('');
-  const [shake, setShake] = useState(false);
-  const [attempt, setAttempt] = useState(false);
+function AdminLoginView({ setAdminAuth, setView, adminAuth, showToast }) {
+  const [status, setStatus] = useState({ loading: true, bootstrapped: false, username: ADMIN_USERNAME });
+  const [form, setForm] = useState({ username: ADMIN_USERNAME, secret: '', confirm: '' });
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
 
-  useEffect(() => { if (adminAuth) setView('admin'); }, []);
+  useEffect(() => {
+    if (adminAuth) {
+      setView('admin');
+      return;
+    }
 
-  const handleLogin = () => {
-    if (input === adminPass) { setAdminAuth(true); setView('admin'); }
-    else { setShake(true); setAttempt(true); setTimeout(() => setShake(false), 600); }
+    let alive = true;
+    API.adminStatus()
+      .then((data) => {
+        if (!alive) return;
+        const username = data?.username || ADMIN_USERNAME;
+        setStatus({ loading: false, bootstrapped: Boolean(data?.bootstrapped), username });
+        setForm((current) => ({ ...current, username }));
+      })
+      .catch((err) => {
+        if (!alive) return;
+        setError('讀取管理設定失敗：' + err.message);
+        setStatus((current) => ({ ...current, loading: false }));
+      });
+
+    return () => { alive = false; };
+  }, [adminAuth, setView]);
+
+  const setField = (key) => (e) => {
+    const value = e.target.value;
+    setForm((current) => ({ ...current, [key]: value }));
+    setError('');
+  };
+
+  const handleLogin = async () => {
+    if (!isFixedAdminUsername(form.username)) {
+      setError(`管理者帳號固定為 ${ADMIN_USERNAME}`);
+      return;
+    }
+    if (!form.secret) {
+      setError('請輸入管理密碼');
+      return;
+    }
+
+    setBusy(true);
+    try {
+      await API.authenticateAdmin(form.username, form.secret);
+      API.setAdminSecret(form.secret);
+      setAdminAuth(true);
+      showToast('管理模式登入成功');
+      setView('admin');
+    } catch (err) {
+      setError(err.message || '登入失敗');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleBootstrap = async () => {
+    if (!isFixedAdminUsername(form.username)) {
+      setError(`管理者帳號固定為 ${ADMIN_USERNAME}`);
+      return;
+    }
+    if (!validateAdminSecret(form.secret)) {
+      setError('管理密碼至少 6 碼');
+      return;
+    }
+    if (form.secret !== form.confirm) {
+      setError('兩次密碼不一致');
+      return;
+    }
+
+    setBusy(true);
+    try {
+      await API.bootstrapAdmin(form.username, form.secret);
+      API.setAdminSecret(form.secret);
+      setAdminAuth(true);
+      showToast('管理者帳號已建立');
+      setView('admin');
+    } catch (err) {
+      setError(err.message || '建立管理帳號失敗');
+    } finally {
+      setBusy(false);
+    }
   };
 
   return (
     <div className="min-h-screen bg-slate-950 flex flex-col items-center justify-center p-6">
-      <style>{`@keyframes shake{0%,100%{transform:translateX(0)}20%,60%{transform:translateX(-8px)}40%,80%{transform:translateX(8px)}}`}</style>
       <div className="w-full max-w-sm">
         <div className="text-center mb-10">
           <div className="w-16 h-16 bg-slate-900 border border-slate-700 rounded-2xl flex items-center justify-center mx-auto mb-4">
             <Icon name="lock" cls="w-8 h-8 text-orange-500" />
           </div>
           <h1 className="text-2xl font-black text-white">管理後台</h1>
-          <p className="text-slate-500 text-sm mt-1">輸入管理密碼以繼續</p>
+          <p className="text-slate-500 text-sm mt-1">{status.bootstrapped ? '使用固定管理者帳號與密碼登入' : '首次使用請先建立固定管理者密碼'}</p>
         </div>
-        <div style={{ animation: shake ? 'shake 0.5s ease' : 'none' }}>
-          <div className={`bg-slate-900 border ${attempt && !shake ? 'border-red-500/40' : 'border-slate-700'} rounded-2xl p-4 mb-3 transition-colors`}>
-            <input type="password" inputMode="numeric"
-              className="w-full bg-transparent text-white text-center text-3xl tracking-[1em] placeholder-slate-700 outline-none"
-              placeholder="••••" value={input}
-              onChange={e => { setInput(e.target.value); setAttempt(false); }}
-              onKeyDown={e => e.key === 'Enter' && handleLogin()}
-              autoFocus />
-          </div>
+
+        <div className="bg-slate-900 border border-slate-700 rounded-2xl p-4 space-y-4">
+          <Field label="管理者帳號">
+            <input className={iCls()} value={form.username} readOnly />
+          </Field>
+
+          {status.loading ? (
+            <div className="text-slate-500 text-sm py-4 flex items-center justify-center gap-2">
+              <Icon name="refresh" cls="w-4 h-4 spin" /> 讀取管理設定中…
+            </div>
+          ) : (
+            <>
+              <Field label={status.bootstrapped ? '管理密碼' : '建立管理密碼'} error={error}>
+                <input
+                  type="password"
+                  className={iCls(error)}
+                  placeholder={status.bootstrapped ? '請輸入管理密碼' : '至少 6 碼'}
+                  value={form.secret}
+                  onChange={setField('secret')}
+                  onKeyDown={e => e.key === 'Enter' && (status.bootstrapped ? handleLogin() : handleBootstrap())}
+                  autoFocus
+                />
+              </Field>
+
+              {!status.bootstrapped && (
+                <Field label="確認管理密碼">
+                  <input
+                    type="password"
+                    className={iCls()}
+                    placeholder="再次輸入管理密碼"
+                    value={form.confirm}
+                    onChange={setField('confirm')}
+                    onKeyDown={e => e.key === 'Enter' && handleBootstrap()}
+                  />
+                </Field>
+              )}
+
+              {error && (
+                <p className="text-red-400 text-sm text-center flex items-center justify-center gap-1">
+                  <Icon name="warning" cls="w-4 h-4" />{error}
+                </p>
+              )}
+
+              <button
+                onClick={status.bootstrapped ? handleLogin : handleBootstrap}
+                disabled={busy}
+                className="w-full bg-gradient-to-r from-orange-600 to-amber-500 disabled:from-slate-700 disabled:to-slate-700 disabled:text-slate-500 text-white rounded-2xl py-4 font-bold shadow-lg shadow-orange-500/20 active:scale-95 transition-all flex items-center justify-center gap-2">
+                {busy
+                  ? <><Icon name="refresh" cls="w-4 h-4 spin" /> 處理中…</>
+                  : status.bootstrapped ? '登入後台' : '建立帳號並登入'}
+              </button>
+            </>
+          )}
         </div>
-        {attempt && !shake
-          ? <p className="text-red-400 text-sm text-center mb-3 flex items-center justify-center gap-1"><Icon name="warning" cls="w-4 h-4" />密碼錯誤，請重試</p>
-          : <div className="mb-3 h-6" />}
-        <button onClick={handleLogin} className="w-full bg-gradient-to-r from-orange-600 to-amber-500 text-white rounded-2xl py-4 font-bold mb-3 shadow-lg shadow-orange-500/20 active:scale-95 transition-all">登入後台</button>
-        <button onClick={() => setView('home')} className="w-full text-slate-600 py-2 text-sm hover:text-slate-400 transition-colors">返回首頁</button>
-        <p className="text-center text-slate-700 text-xs mt-4">預設密碼：0000</p>
+
+        <button onClick={() => setView('home')} className="w-full text-slate-600 py-3 text-sm hover:text-slate-400 transition-colors mt-3">返回首頁</button>
+        <p className="text-center text-slate-700 text-xs mt-4">固定管理者帳號：{status.username}</p>
       </div>
     </div>
   );
@@ -1224,15 +1368,34 @@ function AdminWorkersTab({ workers, contractors, onDeleteWorker, showToast }) {
 }
 
 // ── Settings Tab ────────────────────────────────────────────────
-function SettingsTab({ adminPass, setAdminPass, showToast, setView }) {
-  const [np, setNp] = useState('');
-  const [cp, setCp] = useState('');
+function SettingsTab({ showToast, setView, logoutAdmin }) {
+  const [currentSecret, setCurrentSecret] = useState('');
+  const [nextSecret, setNextSecret] = useState('');
+  const [confirmSecret, setConfirmSecret] = useState('');
+  const [saving, setSaving] = useState(false);
 
-  const changePass = () => {
-    if (np.length < 4) { showToast('密碼至少 4 碼', 'error'); return; }
-    if (np !== cp) { showToast('兩次密碼不一致', 'error'); return; }
-    setAdminPass(np); setNp(''); setCp('');
-    showToast('密碼已更新');
+  const changePass = async () => {
+    if (!currentSecret) { showToast('請輸入目前密碼', 'error'); return; }
+    if (!validateAdminSecret(nextSecret)) { showToast('新密碼至少 6 碼', 'error'); return; }
+    if (nextSecret !== confirmSecret) { showToast('兩次新密碼不一致', 'error'); return; }
+
+    setSaving(true);
+    try {
+      await API.changeAdminSecret(currentSecret, nextSecret);
+      API.setAdminSecret(nextSecret);
+      setCurrentSecret('');
+      setNextSecret('');
+      setConfirmSecret('');
+      showToast('管理密碼已更新');
+    } catch (err) {
+      showToast('密碼更新失敗：' + err.message, 'error');
+      if (/驗證失敗|尚未建立/.test(err.message || '')) {
+        logoutAdmin();
+        setView('adminLogin');
+      }
+    } finally {
+      setSaving(false);
+    }
   };
 
   const resetUrl = () => {
@@ -1245,17 +1408,32 @@ function SettingsTab({ adminPass, setAdminPass, showToast, setView }) {
     setView('setup');
   };
 
+  const handleLogout = () => {
+    logoutAdmin();
+    setView('home');
+    showToast('已登出管理模式');
+  };
+
   return (
     <div className="space-y-4">
       <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4 space-y-4">
-        <h3 className="font-black text-white">修改管理密碼</h3>
+        <h3 className="font-black text-white">管理者帳號</h3>
+        <Field label="固定帳號">
+          <input className={iCls()} value={ADMIN_USERNAME} readOnly />
+        </Field>
+        <Field label="目前密碼">
+          <input type="password" className={iCls()} placeholder="請輸入目前密碼" value={currentSecret} onChange={e => setCurrentSecret(e.target.value)} />
+        </Field>
         <Field label="新密碼">
-          <input type="password" className={iCls()} placeholder="至少 4 碼" value={np} onChange={e => setNp(e.target.value)} />
+          <input type="password" className={iCls()} placeholder="至少 6 碼" value={nextSecret} onChange={e => setNextSecret(e.target.value)} />
         </Field>
         <Field label="確認新密碼">
-          <input type="password" className={iCls()} placeholder="再次輸入" value={cp} onChange={e => setCp(e.target.value)} />
+          <input type="password" className={iCls()} placeholder="再次輸入新密碼" value={confirmSecret} onChange={e => setConfirmSecret(e.target.value)} />
         </Field>
-        <button onClick={changePass} className="w-full bg-orange-600 text-white rounded-xl py-3 text-sm font-bold active:scale-95 transition-all">更新密碼</button>
+        <button onClick={changePass} disabled={saving} className="w-full bg-orange-600 disabled:bg-slate-700 disabled:text-slate-400 text-white rounded-xl py-3 text-sm font-bold active:scale-95 transition-all flex items-center justify-center gap-2">
+          {saving ? <><Icon name="refresh" cls="w-4 h-4 spin" /> 更新中…</> : '更新密碼'}
+        </button>
+        <button onClick={handleLogout} className="w-full bg-slate-800 border border-slate-700 text-slate-300 rounded-xl py-3 text-sm font-medium active:scale-95 transition-all">登出管理模式</button>
       </div>
 
       <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4">

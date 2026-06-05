@@ -5,6 +5,8 @@
 
 const ROOT_FOLDER = '施工人員名冊';
 const DB_FILE     = '📋 系統資料庫';
+const ADMIN_USERNAME = 'admin';
+const ADMIN_SECRET_KEY = 'WR_ADMIN_SECRET';
 
 /* ── Entry Points ─────────────────────────────────────────── */
 
@@ -34,13 +36,65 @@ function respond(obj) {
 
 function run(action, p) {
   switch (action) {
-    case 'getData':          return getData();
-    case 'addContractor':    return addContractor(p);
-    case 'deleteContractor': return deleteContractor(p);
-    case 'addWorker':        return addWorker(p);
-    case 'deleteWorker':     return deleteWorker(p);
+    case 'getData':            return getData();
+    case 'adminStatus':        return adminStatus();
+    case 'authenticateAdmin':  return authenticateAdmin(p);
+    case 'bootstrapAdmin':     return bootstrapAdmin(p);
+    case 'changeAdminSecret':  return changeAdminSecret(p);
+    case 'addContractor':      return addContractor(p);
+    case 'deleteContractor':   return deleteContractor(p);
+    case 'addWorker':          return addWorker(p);
+    case 'deleteWorker':       return deleteWorker(p);
     default: throw new Error('Unknown action: ' + action);
   }
+}
+
+/* ── Admin Auth ───────────────────────────────────────────── */
+
+function getAdminSecret_() {
+  return PropertiesService.getScriptProperties().getProperty(ADMIN_SECRET_KEY) || '';
+}
+
+function normalizeAdminUsername_(value) {
+  return String(value || '').trim().toLowerCase();
+}
+
+function validateAdminSecret_(value) {
+  return String(value || '').length >= 6;
+}
+
+function requireAdmin_(secret) {
+  const saved = getAdminSecret_();
+  if (!saved) throw new Error('尚未建立管理者密碼');
+  if (String(secret || '') !== saved) throw new Error('管理者驗證失敗');
+}
+
+function adminStatus() {
+  return {
+    bootstrapped: Boolean(getAdminSecret_()),
+    username: ADMIN_USERNAME
+  };
+}
+
+function authenticateAdmin(p) {
+  if (normalizeAdminUsername_(p.username) !== ADMIN_USERNAME) throw new Error('管理者帳號錯誤');
+  requireAdmin_(p.secret);
+  return { authenticated: true, username: ADMIN_USERNAME };
+}
+
+function bootstrapAdmin(p) {
+  if (getAdminSecret_()) throw new Error('管理者密碼已設定');
+  if (normalizeAdminUsername_(p.username) !== ADMIN_USERNAME) throw new Error('管理者帳號固定為 admin');
+  if (!validateAdminSecret_(p.secret)) throw new Error('管理密碼至少 6 碼');
+  PropertiesService.getScriptProperties().setProperty(ADMIN_SECRET_KEY, String(p.secret));
+  return { bootstrapped: true, username: ADMIN_USERNAME };
+}
+
+function changeAdminSecret(p) {
+  requireAdmin_(p.currentSecret || p._adminSecret);
+  if (!validateAdminSecret_(p.newSecret)) throw new Error('管理密碼至少 6 碼');
+  PropertiesService.getScriptProperties().setProperty(ADMIN_SECRET_KEY, String(p.newSecret));
+  return { ok: true };
 }
 
 /* ── Drive Helpers ────────────────────────────────────────── */
@@ -142,6 +196,7 @@ function getData() {
 /* ── Contractors ──────────────────────────────────────────── */
 
 function addContractor(p) {
+  requireAdmin_(p._adminSecret);
   const ss = getDb();
   ss.getSheetByName('包商').appendRow([p.id, p.name, p.createdAt]);
   // 建立資料夾 + 名冊 Sheet
@@ -151,6 +206,7 @@ function addContractor(p) {
 }
 
 function deleteContractor(p) {
+  requireAdmin_(p._adminSecret);
   deleteRowById(getDb().getSheetByName('包商'), p.id);
   return { ok: true };
 }
@@ -184,6 +240,7 @@ function addWorker(p) {
 }
 
 function deleteWorker(p) {
+  requireAdmin_(p._adminSecret);
   deleteRowById(getDb().getSheetByName('人員'), p.id);
   return { ok: true };
 }
