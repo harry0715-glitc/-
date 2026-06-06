@@ -28,12 +28,7 @@ const API = {
   clearAdminSession: () => sessionStorage.removeItem(SS_ADMIN_SECRET),
 
   async load() {
-    const url = this.getUrl();
-    if (!url) throw new Error('未設定網址');
-    const res = await fetch(url + '?action=getData', { redirect: 'follow' });
-    const json = await res.json();
-    if (!json.ok) throw new Error(json.error);
-    return json.data; // { contractors, workers }
+    return this.call('getData');
   },
 
   async call(action, payload = {}) {
@@ -128,6 +123,7 @@ const PATHS = {
   link:     "M10 13a5 5 0 007.54.54l3-3a5 5 0 00-7.07-7.07l-1.72 1.71 M14 11a5 5 0 00-7.54-.54l-3 3a5 5 0 007.07 7.07l1.71-1.71",
   refresh:  "M23 4v6h-6 M1 20v-6h6 M3.51 9a9 9 0 0114.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0020.49 15",
   cloud:    "M18 10h-1.26A8 8 0 109 20h9a5 5 0 000-10z",
+  download: "M12 3v12M7 10l5 5 5-5M5 21h14",
 };
 const Icon = ({ name, cls = '' }) => (
   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"
@@ -1378,7 +1374,10 @@ function AdminWorkersTab({ workers, contractors, onDeleteWorker, showToast }) {
 
   return (
     <div className="space-y-3">
-      <div><h2 className="font-black text-white">人員名冊</h2><p className="text-slate-500 text-xs">顯示 {filtered.length} / 共 {workers.length} 筆</p></div>
+      <div>
+        <h2 className="font-black text-white">人員名冊</h2>
+        <p className="text-slate-500 text-xs">顯示 {filtered.length} / 共 {workers.length} 筆</p>
+      </div>
       <div className="relative">
         <Icon name="search" cls="w-4 h-4 text-slate-500 absolute left-3.5 top-1/2 -translate-y-1/2" />
         <input className="w-full bg-slate-900 border border-slate-700 rounded-xl pl-10 pr-4 py-2.5 text-slate-200 placeholder-slate-500 text-sm focus:outline-none focus:border-orange-500/50"

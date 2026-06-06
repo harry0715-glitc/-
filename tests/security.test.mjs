@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 
 import {
   ADMIN_USERNAME,
+  buildContractorSheetWorkerMatcher,
   findDuplicateContractor,
   findDuplicateWorker,
   isFixedAdminUsername,
@@ -13,6 +14,7 @@ import {
   normalizeNotes,
   normalizePhone,
   normalizeText,
+  sanitizeWorkerForPublic,
   validateAdminSecret,
 } from '../src/security.mjs';
 
@@ -79,4 +81,42 @@ test('maskIdNumber hides middle characters', () => {
 test('maskPhone hides middle digits with stable format', () => {
   assert.equal(maskPhone('0912345678'), '09** *** 678');
   assert.equal(maskPhone('09-1234-5678'), '09** *** 678');
+});
+
+test('sanitizeWorkerForPublic masks sensitive fields but keeps display data', () => {
+  const worker = {
+    id: '1',
+    name: '王小明',
+    idNumber: 'A123456789',
+    phone: '0912345678',
+    jobTitle: '水電',
+    contractorId: 'c1',
+    contractorName: '大林水電',
+    entryDate: '2026-06-01',
+    notes: '已完成教育訓練',
+    photoUrl: 'https://example.com/photo.jpg',
+    createdAt: '2026-06-06T10:00:00.000Z',
+  };
+
+  assert.deepEqual(sanitizeWorkerForPublic(worker), {
+    ...worker,
+    idNumber: 'A*******89',
+    phone: '09** *** 678',
+  });
+});
+
+test('buildContractorSheetWorkerMatcher matches the exact contractor-sheet row for deletion sync', () => {
+  const worker = {
+    name: '王小明',
+    idNumber: 'A123456789',
+    phone: '0912345678',
+    jobTitle: '水電',
+    entryDate: '2026-06-01',
+    notes: '需補件',
+    createdAt: '2026-06-06T10:00:00.000Z',
+  };
+
+  const matcher = buildContractorSheetWorkerMatcher(worker);
+  assert.equal(matcher(['1', '王小明', 'A123456789', '0912345678', '水電', '2026-06-01', '需補件', new Date(worker.createdAt).toLocaleString('zh-TW')]), true);
+  assert.equal(matcher(['1', '王小明', 'A123456789', '0912345678', '木工', '2026-06-01', '需補件', new Date(worker.createdAt).toLocaleString('zh-TW')]), false);
 });

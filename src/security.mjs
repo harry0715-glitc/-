@@ -70,3 +70,40 @@ export function maskPhone(value = '') {
   if (digits.length < 7) return text.replace(/.(?=..)/g, '*');
   return `${digits.slice(0, 2)}** *** ${digits.slice(-3)}`;
 }
+
+export function sanitizeWorkerForPublic(worker = {}) {
+  return {
+    ...worker,
+    idNumber: worker?.idNumber ? maskIdNumber(worker.idNumber) : '',
+    phone: worker?.phone ? maskPhone(worker.phone) : '',
+  };
+}
+
+export function sanitizeWorkersForPublic(workers = []) {
+  return workers.map((worker) => sanitizeWorkerForPublic(worker));
+}
+
+export function buildContractorSheetWorkerMatcher(worker = {}) {
+  const expected = [
+    normalizeText(worker.name),
+    normalizeIdNumber(worker.idNumber),
+    normalizePhone(worker.phone),
+    normalizeText(worker.jobTitle),
+    normalizeText(worker.entryDate),
+    normalizeNotes(worker.notes),
+    worker.createdAt ? normalizeText(new Date(worker.createdAt).toLocaleString('zh-TW')) : '',
+  ];
+
+  return (row = []) => {
+    const actual = [
+      normalizeText(row[1]),
+      normalizeIdNumber(row[2]),
+      normalizePhone(row[3]),
+      normalizeText(row[4]),
+      normalizeText(row[5]),
+      normalizeNotes(row[6]),
+      normalizeText(row[7]),
+    ];
+    return expected.every((value, index) => actual[index] === value);
+  };
+}

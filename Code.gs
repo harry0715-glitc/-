@@ -93,6 +93,11 @@ function requireAdmin_(secret) {
   if (String(secret || '') !== saved) throw new Error('管理者驗證失敗');
 }
 
+function hasAdminAccess_(secret) {
+  const saved = getAdminSecret_();
+  return Boolean(saved) && String(secret || '') === saved;
+}
+
 function adminStatus() {
   return {
     bootstrapped: Boolean(getAdminSecret_()),
@@ -238,6 +243,65 @@ function findDuplicateWorker_(workers, payload) {
   return profileMatch ? { type: 'profile', worker: profileMatch } : null;
 }
 
+function maskIdNumber_(value) {
+  const text = normalizeIdNumber_(value);
+  if (!text) return '';
+  if (text.length <= 4) return Array(text.length + 1).join('*');
+  return text.slice(0, 1) + text.slice(1, -2).replace(/./g, '*') + text.slice(-2);
+}
+
+function maskPhone_(value) {
+  const digits = normalizePhone_(value);
+  if (!digits) return '';
+  if (digits.length < 7) return String(value || '').replace(/.(?=..)/g, '*');
+  return digits.slice(0, 2) + '** *** ' + digits.slice(-3);
+}
+
+function sanitizeWorkerForPublic_(worker) {
+  return Object.assign({}, worker, {
+    idNumber: worker.idNumber ? maskIdNumber_(worker.idNumber) : '',
+    phone: worker.phone ? maskPhone_(worker.phone) : ''
+  });
+}
+
+function buildContractorSheetWorkerMatcher_(worker) {
+  const expected = [
+    normalizeText_(worker.name),
+    normalizeIdNumber_(worker.idNumber),
+    normalizePhone_(worker.phone),
+    normalizeText_(worker.jobTitle),
+    normalizeText_(worker.entryDate),
+    normalizeNotes_(worker.notes),
+    worker.createdAt ? normalizeText_(new Date(worker.createdAt).toLocaleString('zh-TW')) : ''
+  ];
+
+  return function(row) {
+    const actual = [
+      normalizeText_(row[1]),
+      normalizeIdNumber_(row[2]),
+      normalizePhone_(row[3]),
+      normalizeText_(row[4]),
+      normalizeText_(row[5]),
+      normalizeNotes_(row[6]),
+      normalizeText_(row[7])
+    ];
+    return expected.every(function(value, index) {
+      return actual[index] === value;
+    });
+  };
+}
+
+function deleteFirstMatchingDataRow_(sheet, predicate) {
+  const vals = sheet.getDataRange().getValues();
+  for (let i = 1; i < vals.length; i++) {
+    if (predicate(vals[i], i + 1)) {
+      sheet.deleteRow(i + 1);
+      return true;
+    }
+  }
+  return false;
+}
+
 function sanitizeContractorPayload_(p, contractors) {
   const name = normalizeText_(p.name);
   if (!name) throw new Error('請輸入包商名稱');
@@ -296,11 +360,14 @@ function sanitizeWorkerPayload_(p, contractors, workers) {
 
 /* ── getData ──────────────────────────────────────────────── */
 
-function getData() {
+function getData(p) {
   const ss = getDb();
+  const contractors = readSheet(ss.getSheetByName('包商'));
+  const workers = readSheet(ss.getSheetByName('人員'));
+  const canViewSensitive = hasAdminAccess_(p && p._adminSecret);
   return {
-    contractors: readSheet(ss.getSheetByName('包商')),
-    workers:     readSheet(ss.getSheetByName('人員'))
+    contractors: contractors,
+    workers: canViewSensitive ? workers : workers.map(sanitizeWorkerForPublic_)
   };
 }
 
@@ -364,7 +431,14 @@ function addWorker(p) {
 
 function deleteWorker(p) {
   requireAdmin_(p._adminSecret);
-  deleteRowById(getDb().getSheetByName('人員'), p.id);
+  const ss = getDb();
+  const workersSheet = ss.getSheetByName('人員');
+  const workers = readSheet(workersSheet);
+  const worker = workers.find(item => String(item.id) === String(p.id));
+  if (!worker) throw new Error('找不到要刪除的人員資料');
+
+  deleteRowById(workersSheet, p.id);
+  deleteWorkerFromContractorSheet_(worker.contractorName, worker);
   return { ok: true };
 }
 
@@ -433,5 +507,23 @@ function appendWorkerToContractorSheet(coName, worker, photoUrl) {
     sheet.autoResizeColumns(1, 8);
   } catch (err) {
     console.error('appendWorkerToContractorSheet error:', err);
+  }
+}
+
+function deleteWorkerFromContractorSheet_(coName, worker) {
+  try {
+    const ss = ensureContractorSheet(coName);
+    const sheet = ss.getSheetByName('名冊') || ss.getSheets()[0];
+    const matcher = buildContractorSheetWorkerMatcher_(worker);
+    deleteFirstMatchingDataRow_(sheet, matcher);
+    const lastRow = sheet.getLastRow();
+    if (lastRow <= 1) return;
+    const values = sheet.getRange(2, 1, lastRow - 1, 8).getValues();
+    for (let i = 0; i < values.length; i++) {
+      values[i][0] = i + 1;
+    }
+    sheet.getRange(2, 1, values.length, 8).setValues(values);
+  } catch (err) {
+    console.error('deleteWorkerFromContractorSheet error:', err);
   }
 }
