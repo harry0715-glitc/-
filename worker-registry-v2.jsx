@@ -505,7 +505,7 @@ function SetupView({ onDone }) {
           <p className="text-xs font-bold text-orange-400 mb-3">📋 設定步驟</p>
           {[
             '前往 script.google.com',
-            '新增專案 → 貼上 Code.gs 程式碼',
+            '新增專案 → 貼上 Code.js 程式碼',
             '部署 → 新增部署項目 → 網路應用程式',
             '執行身分：我、存取對象：任何人',
             '複製部署網址貼上方',
