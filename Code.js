@@ -260,7 +260,7 @@ function maskPhone_(value) {
 function sanitizeWorkerForPublic_(worker) {
   return Object.assign({}, worker, {
     idNumber: worker.idNumber ? maskIdNumber_(worker.idNumber) : '',
-    phone: worker.phone ? maskPhone_(worker.phone) : ''
+    phone: worker.phone ? normalizePhone_(worker.phone) : ''
   });
 }
 
@@ -489,7 +489,7 @@ function ensureContractorSheet(coName) {
   return ss;
 }
 
-function appendWorkerToContractorSheet(coName, worker, photoUrl) {
+function appendWorkerToContractorSheet(coName, worker, _photoUrl) {
   try {
     const ss = ensureContractorSheet(coName);
     const sheet = ss.getSheetByName('名冊') || ss.getSheets()[0];

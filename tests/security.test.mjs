@@ -83,7 +83,7 @@ test('maskPhone hides middle digits with stable format', () => {
   assert.equal(maskPhone('09-1234-5678'), '09** *** 678');
 });
 
-test('sanitizeWorkerForPublic masks sensitive fields but keeps display data', () => {
+test('sanitizeWorkerForPublic masks id number but keeps phone visible for display', () => {
   const worker = {
     id: '1',
     name: '王小明',
@@ -101,7 +101,7 @@ test('sanitizeWorkerForPublic masks sensitive fields but keeps display data', ()
   assert.deepEqual(sanitizeWorkerForPublic(worker), {
     ...worker,
     idNumber: 'A*******89',
-    phone: '09** *** 678',
+    phone: '0912345678',
   });
 });
 

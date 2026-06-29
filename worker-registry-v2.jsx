@@ -1,17 +1,22 @@
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import {
   ADMIN_USERNAME,
   findDuplicateContractor,
   findDuplicateWorker,
   isFixedAdminUsername,
   maskIdNumber,
-  maskPhone,
   normalizeIdNumber,
   normalizeNotes,
   normalizePhone,
   normalizeText,
   validateAdminSecret,
 } from "./src/security.mjs";
+import {
+  buildDuplicateWorkerMessage,
+  filterAndSortWorkers,
+  getContractorName,
+  getJobTitleOptions,
+} from "./src/worker-directory.mjs";
 
 // ── Config keys ────────────────────────────────────────────────
 const LS_URL = 'wr_script_url';
@@ -64,6 +69,34 @@ const API = {
     return this.call('changeAdminSecret', { currentSecret, newSecret });
   },
 };
+
+const WORKER_SORT_OPTIONS = [
+  { value: 'createdAtDesc', label: '依最近新增' },
+  { value: 'createdAtAsc', label: '依最早新增' },
+  { value: 'nameAsc', label: '依姓名排序' },
+  { value: 'contractorAsc', label: '依包商排序' },
+  { value: 'entryDateDesc', label: '依進場日期' },
+];
+
+function formatDateZhTW(value) {
+  const text = String(value || '').trim();
+  if (!text) return '—';
+
+  const match = text.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (match) {
+    const [, year, month, day] = match;
+    return `${year}年${Number(month)}月${Number(day)}日`;
+  }
+
+  const date = new Date(text);
+  if (Number.isNaN(date.getTime())) return text;
+
+  return date.toLocaleDateString('zh-TW', {
+    year: 'numeric',
+    month: 'long',
+    day: 'numeric',
+  });
+}
 
 // ── Browser + image helpers ─────────────────────────────────────
 const isInAppBrowser = () => {
@@ -163,8 +196,47 @@ function Toast({ msg, type, visible }) {
   );
 }
 
+function ConfirmDialog({ open, title, description, confirmText = '確認', cancelText = '取消', danger = false, details = [], busy = false, onConfirm, onCancel }) {
+  if (!open) return null;
+
+  return (
+    <div className="fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-sm flex items-end sm:items-center justify-center p-4">
+      <div className="w-full max-w-md bg-slate-900 border border-slate-700 rounded-3xl shadow-2xl overflow-hidden">
+        <div className="p-5 space-y-4">
+          <div className={`w-12 h-12 rounded-2xl flex items-center justify-center ${danger ? 'bg-red-500/10 border border-red-500/30' : 'bg-orange-500/10 border border-orange-500/30'}`}>
+            <Icon name={danger ? 'trash' : 'warning'} cls={`w-5 h-5 ${danger ? 'text-red-400' : 'text-orange-400'}`} />
+          </div>
+          <div>
+            <h3 className="text-lg font-black text-white">{title}</h3>
+            <p className="text-slate-400 text-sm leading-relaxed mt-2">{description}</p>
+          </div>
+          {details.length > 0 && (
+            <div className="bg-slate-950/60 border border-slate-800 rounded-2xl divide-y divide-slate-800">
+              {details.map((detail) => (
+                <div key={detail.label} className="flex gap-3 px-4 py-3 text-sm">
+                  <div className="w-20 text-slate-500 flex-shrink-0">{detail.label}</div>
+                  <div className="text-slate-200 font-medium break-all">{detail.value || '—'}</div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+        <div className="grid grid-cols-2 gap-3 p-5 pt-0">
+          <button onClick={onCancel} disabled={busy} className="bg-slate-800 border border-slate-700 text-slate-300 rounded-2xl py-3 text-sm font-semibold disabled:opacity-50">
+            {cancelText}
+          </button>
+          <button onClick={onConfirm} disabled={busy} className={`${danger ? 'bg-red-500 text-white' : 'bg-orange-600 text-white'} rounded-2xl py-3 text-sm font-bold disabled:opacity-50 flex items-center justify-center gap-2`}>
+            {busy ? <><Icon name="refresh" cls="w-4 h-4 spin" /> 處理中…</> : confirmText}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function CameraOpenHelp({ show, onClose, showToast }) {
   if (!show) return null;
+
   const copyLink = async () => {
     try {
       await navigator.clipboard.writeText(location.href);
@@ -357,7 +429,7 @@ export default function App() {
   const [view, setView] = useState('loading');
   const [contractors, setContractors] = useState([]);
   const [workers, setWorkers] = useState([]);
-  const [adminAuth, setAdminAuth] = useState(false);
+  const [adminAuth, setAdminAuth] = useState(Boolean(API.getAdminSecret()));
   const [toast, setToast] = useState({ msg: '', type: 'success', visible: false });
   const [initError, setInitError] = useState('');
 
@@ -381,7 +453,6 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    setAdminAuth(Boolean(API.getAdminSecret()));
     loadData();
   }, [loadData]);
 
@@ -654,6 +725,7 @@ function RegisterView({ setView, contractors, workers, onAddWorker, showToast })
   const [saving, setSaving] = useState(false);
   const [done, setDone] = useState(false);
   const [errors, setErrors] = useState({});
+  const [duplicateHint, setDuplicateHint] = useState('');
   const [savedPhotoUrl, setSavedPhotoUrl] = useState('');
   const cameraRef = useRef();
   const galleryRef = useRef();
@@ -666,6 +738,7 @@ function RegisterView({ setView, contractors, workers, onAddWorker, showToast })
     if (k === 'phone') value = normalizePhone(value);
     if (k === 'notes') value = normalizeNotes(value);
     setForm(f => ({ ...f, [k]: value }));
+    setDuplicateHint('');
     setErrors(current => {
       if (!current[k]) return current;
       const next = { ...current };
@@ -750,12 +823,13 @@ function RegisterView({ setView, contractors, workers, onAddWorker, showToast })
     };
     const duplicate = findDuplicateWorker(workers, worker);
     if (duplicate) {
-      const message = duplicate.type === 'idNumber'
-        ? '此身分證字號已存在，請確認是否重複登記'
-        : '同包商下已有相同姓名與手機的人員資料';
+      const message = buildDuplicateWorkerMessage(duplicate, contractors);
+      setDuplicateHint(message);
       showToast(message, 'error');
       return;
     }
+
+    setDuplicateHint('');
 
     setSaving(true);
     try {
@@ -817,6 +891,15 @@ function RegisterView({ setView, contractors, workers, onAddWorker, showToast })
       </div>
 
       <div className="px-4 py-5 pb-32 space-y-5">
+        {duplicateHint && (
+          <div className="bg-red-500/10 border border-red-500/30 rounded-2xl p-4 flex items-start gap-3">
+            <Icon name="warning" cls="w-5 h-5 text-red-400 flex-shrink-0 mt-0.5" />
+            <div>
+              <div className="text-red-300 text-sm font-semibold">偵測到疑似重複資料</div>
+              <p className="text-red-200/80 text-xs leading-relaxed mt-1">{duplicateHint}。請先到名冊查詢確認是否已登記。</p>
+            </div>
+          </div>
+        )}
         {/* Photo */}
         <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4">
           <div className="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-3">人員照片</div>
@@ -896,14 +979,19 @@ function RegisterView({ setView, contractors, workers, onAddWorker, showToast })
 function QueryView({ setView, workers, contractors, loadData }) {
   const [search, setSearch] = useState('');
   const [filterCo, setFilterCo] = useState('');
+  const [filterJob, setFilterJob] = useState('');
+  const [sortBy, setSortBy] = useState('createdAtDesc');
   const [selected, setSelected] = useState(null);
 
-  const getName = id => contractors.find(c => c.id === id)?.name || '未知';
-  const filtered = workers.filter(w => {
-    const s = search.toLowerCase();
-    return (!s || w.name?.includes(s) || (w.idNumber||'').includes(s) || (w.phone||'').includes(s) || (w.jobTitle||'').toLowerCase().includes(s))
-      && (!filterCo || w.contractorId === filterCo);
-  });
+  const jobTitleOptions = useMemo(() => getJobTitleOptions(workers), [workers]);
+  const filtered = useMemo(() => filterAndSortWorkers(workers, contractors, {
+    search,
+    contractorId: filterCo,
+    jobTitle: filterJob,
+    sortBy,
+  }), [workers, contractors, search, filterCo, filterJob, sortBy]);
+
+  const getName = (id) => getContractorName(contractors, id);
 
   if (selected) return (
     <WorkerDetail worker={selected} contractorName={getName(selected.contractorId)} onBack={() => setSelected(null)} />
@@ -924,13 +1012,24 @@ function QueryView({ setView, workers, contractors, loadData }) {
         <div className="relative mb-2">
           <Icon name="search" cls="w-4 h-4 text-slate-500 absolute left-3.5 top-1/2 -translate-y-1/2" />
           <input className="w-full bg-slate-900 border border-slate-700 rounded-xl pl-10 pr-4 py-2.5 text-slate-200 placeholder-slate-500 text-sm focus:outline-none focus:border-orange-500/50"
-            placeholder="搜尋姓名、身分證、電話、職稱…" value={search} onChange={e => setSearch(e.target.value)} />
+            placeholder="搜尋姓名、包商、身分證、電話、職稱、備註…" value={search} onChange={e => setSearch(e.target.value)} />
         </div>
-        <select className="w-full bg-slate-900 border border-slate-700 rounded-xl px-4 py-2.5 text-slate-300 text-sm focus:outline-none"
-          value={filterCo} onChange={e => setFilterCo(e.target.value)}>
-          <option value="">全部包商</option>
-          {contractors.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
-        </select>
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+          <select className="w-full bg-slate-900 border border-slate-700 rounded-xl px-4 py-2.5 text-slate-300 text-sm focus:outline-none"
+            value={filterCo} onChange={e => setFilterCo(e.target.value)}>
+            <option value="">全部包商</option>
+            {contractors.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+          </select>
+          <select className="w-full bg-slate-900 border border-slate-700 rounded-xl px-4 py-2.5 text-slate-300 text-sm focus:outline-none"
+            value={filterJob} onChange={e => setFilterJob(e.target.value)}>
+            <option value="">全部職稱</option>
+            {jobTitleOptions.map(job => <option key={job} value={job}>{job}</option>)}
+          </select>
+          <select className="w-full bg-slate-900 border border-slate-700 rounded-xl px-4 py-2.5 text-slate-300 text-sm focus:outline-none"
+            value={sortBy} onChange={e => setSortBy(e.target.value)}>
+            {WORKER_SORT_OPTIONS.map(option => <option key={option.value} value={option.value}>{option.label}</option>)}
+          </select>
+        </div>
         <p className="text-slate-600 text-xs mt-2">顯示 {filtered.length} / 共 {workers.length} 筆</p>
       </div>
 
@@ -966,9 +1065,9 @@ function QueryView({ setView, workers, contractors, loadData }) {
 function WorkerDetail({ worker: w, contractorName, onBack }) {
   const rows = [
     { label: '身分證字號', value: w.idNumber ? maskIdNumber(w.idNumber) : '—' },
-    { label: '手機號碼',   value: w.phone ? maskPhone(w.phone) : '—' },
+    { label: '手機號碼',   value: w.phone || '—' },
     { label: '所屬包商',   value: contractorName },
-    { label: '進場日期',   value: w.entryDate || '—' },
+    { label: '進場日期',   value: formatDateZhTW(w.entryDate) },
     { label: '備註',       value: w.notes || '—' },
     { label: '登記時間',   value: w.createdAt ? new Date(w.createdAt).toLocaleString('zh-TW') : '—' },
   ];
@@ -1218,10 +1317,11 @@ function AdminView(props) {
 }
 
 // ── Contractors Tab ─────────────────────────────────────────────
-function ContractorsTab({ contractors, onAddContractor, onDeleteContractor, showToast }) {
+function ContractorsTab({ contractors, workers, onAddContractor, onDeleteContractor, showToast }) {
   const [newName, setNewName] = useState('');
   const [adding, setAdding] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [pendingDelete, setPendingDelete] = useState(null);
 
   const add = async () => {
     const normalizedName = normalizeText(newName);
@@ -1243,11 +1343,22 @@ function ContractorsTab({ contractors, onAddContractor, onDeleteContractor, show
     }
   };
 
-  const del = async (id, name) => {
-    if (!confirm(`確定刪除「${name}」？`)) return;
+  const openDeleteDialog = (contractor) => {
+    const workerCount = workers.filter((worker) => String(worker.contractorId) === String(contractor.id)).length;
+    setPendingDelete({ ...contractor, workerCount });
+  };
+
+  const confirmDelete = async () => {
+    if (!pendingDelete) return;
+    if (pendingDelete.workerCount > 0) {
+      showToast(`此包商底下仍有 ${pendingDelete.workerCount} 筆人員資料，請先刪除人員資料`, 'error');
+      setPendingDelete(null);
+      return;
+    }
     try {
-      await onDeleteContractor(id);
-      showToast(`已刪除「${name}」`);
+      await onDeleteContractor(pendingDelete.id);
+      showToast(`已刪除「${pendingDelete.name}」`);
+      setPendingDelete(null);
     } catch (err) {
       showToast('刪除失敗：' + err.message, 'error');
     }
@@ -1255,6 +1366,23 @@ function ContractorsTab({ contractors, onAddContractor, onDeleteContractor, show
 
   return (
     <div className="space-y-4">
+      <ConfirmDialog
+        open={Boolean(pendingDelete)}
+        title={pendingDelete?.workerCount > 0 ? '目前無法刪除此包商' : '確定刪除此包商？'}
+        description={pendingDelete?.workerCount > 0
+          ? '這個包商底下仍有人員資料，為避免資料關聯錯亂，請先刪除該包商底下的人員。'
+          : '刪除後將移除這筆包商資料。若之後還要使用，需重新建立。'}
+        confirmText={pendingDelete?.workerCount > 0 ? '知道了' : '確認刪除'}
+        cancelText="取消"
+        danger={pendingDelete?.workerCount === 0}
+        details={pendingDelete ? [
+          { label: '包商', value: pendingDelete.name },
+          { label: '建立日', value: pendingDelete.createdAt ? new Date(pendingDelete.createdAt).toLocaleDateString('zh-TW') : '—' },
+          { label: '人員數', value: `${pendingDelete.workerCount} 筆` },
+        ] : []}
+        onCancel={() => setPendingDelete(null)}
+        onConfirm={confirmDelete}
+      />
       <div className="flex items-center justify-between">
         <div>
           <h2 className="font-black text-white">承包商管理</h2>
@@ -1283,20 +1411,23 @@ function ContractorsTab({ contractors, onAddContractor, onDeleteContractor, show
 
       {contractors.length === 0
         ? <div className="text-center py-16"><Icon name="building" cls="w-12 h-12 text-slate-700 mx-auto mb-3" /><p className="text-slate-600">尚未新增任何包商</p></div>
-        : contractors.map((c, i) => (
-          <div key={c.id} className="bg-slate-900 border border-slate-800 rounded-2xl px-4 py-3 flex items-center gap-3">
-            <div className="w-8 h-8 bg-orange-500/10 border border-orange-500/20 rounded-lg flex items-center justify-center flex-shrink-0">
-              <span className="text-orange-500 text-xs font-bold">{i + 1}</span>
+        : contractors.map((c, i) => {
+          const workerCount = workers.filter((worker) => String(worker.contractorId) === String(c.id)).length;
+          return (
+            <div key={c.id} className="bg-slate-900 border border-slate-800 rounded-2xl px-4 py-3 flex items-center gap-3">
+              <div className="w-8 h-8 bg-orange-500/10 border border-orange-500/20 rounded-lg flex items-center justify-center flex-shrink-0">
+                <span className="text-orange-500 text-xs font-bold">{i + 1}</span>
+              </div>
+              <div className="flex-1 min-w-0">
+                <div className="font-bold text-white text-sm">{c.name}</div>
+                <div className="text-slate-600 text-xs">{c.createdAt ? new Date(c.createdAt).toLocaleDateString('zh-TW') : ''} · {workerCount} 人</div>
+              </div>
+              <button onClick={() => openDeleteDialog(c)} className="text-slate-600 hover:text-red-400 transition-colors p-1.5 rounded-lg hover:bg-red-500/10">
+                <Icon name="trash" cls="w-4 h-4" />
+              </button>
             </div>
-            <div className="flex-1 min-w-0">
-              <div className="font-bold text-white text-sm">{c.name}</div>
-              <div className="text-slate-600 text-xs">{c.createdAt ? new Date(c.createdAt).toLocaleDateString('zh-TW') : ''}</div>
-            </div>
-            <button onClick={() => del(c.id, c.name)} className="text-slate-600 hover:text-red-400 transition-colors p-1.5 rounded-lg hover:bg-red-500/10">
-              <Icon name="trash" cls="w-4 h-4" />
-            </button>
-          </div>
-        ))
+          );
+        })
       }
     </div>
   );
@@ -1306,22 +1437,28 @@ function ContractorsTab({ contractors, onAddContractor, onDeleteContractor, show
 function AdminWorkersTab({ workers, contractors, onDeleteWorker, showToast }) {
   const [search, setSearch] = useState('');
   const [filterCo, setFilterCo] = useState('');
+  const [filterJob, setFilterJob] = useState('');
+  const [sortBy, setSortBy] = useState('createdAtDesc');
   const [selected, setSelected] = useState(null);
   const [deleting, setDeleting] = useState(false);
+  const [pendingDelete, setPendingDelete] = useState(null);
 
-  const getName = id => contractors.find(c => c.id === id)?.name || '未知';
-  const filtered = workers.filter(w => {
-    const s = search.toLowerCase();
-    return (!s || w.name?.includes(s) || (w.idNumber||'').includes(s) || (w.phone||'').includes(s))
-      && (!filterCo || w.contractorId === filterCo);
-  });
+  const getName = (id) => getContractorName(contractors, id);
+  const jobTitleOptions = useMemo(() => getJobTitleOptions(workers), [workers]);
+  const filtered = useMemo(() => filterAndSortWorkers(workers, contractors, {
+    search,
+    contractorId: filterCo,
+    jobTitle: filterJob,
+    sortBy,
+  }), [workers, contractors, search, filterCo, filterJob, sortBy]);
 
-  const del = async (id) => {
-    if (!confirm('確定刪除此人員資料？Sheets 記錄將同步刪除。')) return;
+  const confirmDelete = async () => {
+    if (!pendingDelete) return;
     setDeleting(true);
     try {
-      await onDeleteWorker(id);
-      showToast('已刪除人員資料');
+      await onDeleteWorker(pendingDelete.id);
+      showToast(`已刪除 ${pendingDelete.name}，並同步更新包商名冊`);
+      setPendingDelete(null);
       setSelected(null);
     } catch (err) {
       showToast('刪除失敗：' + err.message, 'error');
@@ -1334,14 +1471,31 @@ function AdminWorkersTab({ workers, contractors, onDeleteWorker, showToast }) {
     const w = selected;
     const rows = [
       { label: '身分證字號', value: w.idNumber || '—' },
-      { label: '手機號碼',   value: w.phone || '—' },
-      { label: '所屬包商',   value: getName(w.contractorId) },
-      { label: '進場日期',   value: w.entryDate || '—' },
-      { label: '備註',       value: w.notes || '—' },
-      { label: '登記時間',   value: w.createdAt ? new Date(w.createdAt).toLocaleString('zh-TW') : '—' },
+      { label: '手機號碼', value: w.phone || '—' },
+      { label: '所屬包商', value: getName(w.contractorId) },
+      { label: '進場日期', value: formatDateZhTW(w.entryDate) },
+      { label: '備註', value: w.notes || '—' },
+      { label: '登記時間', value: w.createdAt ? new Date(w.createdAt).toLocaleString('zh-TW') : '—' },
     ];
     return (
       <div className="space-y-4">
+        <ConfirmDialog
+          open={Boolean(pendingDelete)}
+          title="確定刪除此人員資料？"
+          description="刪除後會同步移除主資料表與包商獨立名冊中的對應資料，且無法復原。"
+          confirmText="確認刪除"
+          cancelText="取消"
+          danger
+          busy={deleting}
+          details={pendingDelete ? [
+            { label: '姓名', value: pendingDelete.name },
+            { label: '包商', value: getName(pendingDelete.contractorId) },
+            { label: '手機', value: pendingDelete.phone || '—' },
+            { label: '身分證', value: pendingDelete.idNumber ? maskIdNumber(pendingDelete.idNumber) : '—' },
+          ] : []}
+          onCancel={() => setPendingDelete(null)}
+          onConfirm={confirmDelete}
+        />
         <button onClick={() => setSelected(null)} className="flex items-center gap-1.5 text-orange-500 text-sm font-medium">
           <Icon name="back" cls="w-4 h-4" /> 返回列表
         </button>
@@ -1363,9 +1517,9 @@ function AdminWorkersTab({ workers, contractors, onDeleteWorker, showToast }) {
               <div className="text-sm text-slate-200 font-medium flex-1">{r.value}</div>
             </div>
           ))}
-          <button onClick={() => del(w.id)} disabled={deleting}
+          <button onClick={() => setPendingDelete(w)} disabled={deleting}
             className="w-full mt-4 bg-red-500/10 border border-red-500/30 text-red-400 rounded-xl py-3 text-sm font-semibold flex items-center justify-center gap-2 active:scale-95 transition-all disabled:opacity-50">
-            {deleting ? <><Icon name="refresh" cls="w-4 h-4 spin" /> 刪除中…</> : <><Icon name="trash" cls="w-4 h-4" /> 刪除此人員資料</>}
+            <Icon name="trash" cls="w-4 h-4" /> 刪除此人員資料
           </button>
         </div>
       </div>
@@ -1381,13 +1535,24 @@ function AdminWorkersTab({ workers, contractors, onDeleteWorker, showToast }) {
       <div className="relative">
         <Icon name="search" cls="w-4 h-4 text-slate-500 absolute left-3.5 top-1/2 -translate-y-1/2" />
         <input className="w-full bg-slate-900 border border-slate-700 rounded-xl pl-10 pr-4 py-2.5 text-slate-200 placeholder-slate-500 text-sm focus:outline-none focus:border-orange-500/50"
-          placeholder="搜尋姓名、身分證、電話…" value={search} onChange={e => setSearch(e.target.value)} />
+          placeholder="搜尋姓名、包商、身分證、電話、職稱、備註…" value={search} onChange={e => setSearch(e.target.value)} />
       </div>
-      <select className="w-full bg-slate-900 border border-slate-700 rounded-xl px-4 py-2.5 text-slate-300 text-sm focus:outline-none"
-        value={filterCo} onChange={e => setFilterCo(e.target.value)}>
-        <option value="">全部包商</option>
-        {contractors.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
-      </select>
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
+        <select className="w-full bg-slate-900 border border-slate-700 rounded-xl px-4 py-2.5 text-slate-300 text-sm focus:outline-none"
+          value={filterCo} onChange={e => setFilterCo(e.target.value)}>
+          <option value="">全部包商</option>
+          {contractors.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+        </select>
+        <select className="w-full bg-slate-900 border border-slate-700 rounded-xl px-4 py-2.5 text-slate-300 text-sm focus:outline-none"
+          value={filterJob} onChange={e => setFilterJob(e.target.value)}>
+          <option value="">全部職稱</option>
+          {jobTitleOptions.map(job => <option key={job} value={job}>{job}</option>)}
+        </select>
+        <select className="w-full bg-slate-900 border border-slate-700 rounded-xl px-4 py-2.5 text-slate-300 text-sm focus:outline-none"
+          value={sortBy} onChange={e => setSortBy(e.target.value)}>
+          {WORKER_SORT_OPTIONS.map(option => <option key={option.value} value={option.value}>{option.label}</option>)}
+        </select>
+      </div>
       {filtered.length === 0
         ? <div className="text-center py-12"><Icon name="user" cls="w-12 h-12 text-slate-700 mx-auto mb-3" /><p className="text-slate-600">查無人員資料</p></div>
         : filtered.map(w => (

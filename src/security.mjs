@@ -75,7 +75,7 @@ export function sanitizeWorkerForPublic(worker = {}) {
   return {
     ...worker,
     idNumber: worker?.idNumber ? maskIdNumber(worker.idNumber) : '',
-    phone: worker?.phone ? maskPhone(worker.phone) : '',
+    phone: worker?.phone ? normalizePhone(worker.phone) : '',
   };
 }
 
