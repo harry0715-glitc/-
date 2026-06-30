@@ -43,10 +43,19 @@ async function requestAppsScript(url, action, payload) {
 // ── API ────────────────────────────────────────────────────────
 const API = {
   getStoredUrl: () => localStorage.getItem(LS_URL) || '',
-  getUrl: () => localStorage.getItem(LS_URL) || DEFAULT_SCRIPT_URL,
-  setUrl: (u) => localStorage.setItem(LS_URL, u),
   clearStoredUrl: () => localStorage.removeItem(LS_URL),
   hasDefaultUrl: () => Boolean(DEFAULT_SCRIPT_URL),
+  getUrl() {
+    const storedUrl = this.getStoredUrl();
+    if (DEFAULT_SCRIPT_URL) {
+      if (storedUrl && storedUrl !== DEFAULT_SCRIPT_URL) {
+        this.clearStoredUrl();
+      }
+      return DEFAULT_SCRIPT_URL;
+    }
+    return storedUrl;
+  },
+  setUrl: (u) => localStorage.setItem(LS_URL, u),
   getAdminSecret: () => sessionStorage.getItem(SS_ADMIN_SECRET) || '',
   setAdminSecret: (secret) => sessionStorage.setItem(SS_ADMIN_SECRET, secret),
   clearAdminSession: () => sessionStorage.removeItem(SS_ADMIN_SECRET),
