@@ -23,10 +23,29 @@ const LS_URL = 'wr_script_url';
 const SS_ADMIN_SECRET = 'wr_admin_secret';
 const DEFAULT_SCRIPT_URL = import.meta.env.VITE_APPS_SCRIPT_URL || '';
 
+async function requestAppsScript(url, action, payload) {
+  const res = await fetch(url, {
+    method: 'POST',
+    body: JSON.stringify({ action, payload }),
+    redirect: 'follow',
+  });
+  const text = await res.text();
+  try {
+    return JSON.parse(text);
+  } catch {
+    const snippet = String(text || '').slice(0, 120).trim();
+    throw new Error(snippet.startsWith('<!doctype') || snippet.startsWith('<html') || snippet.startsWith('<')
+      ? 'Apps Script 回傳了 HTML 登入頁/錯誤頁，可能仍在使用舊網址'
+      : 'Apps Script 回應不是有效 JSON');
+  }
+}
+
 // ── API ────────────────────────────────────────────────────────
 const API = {
+  getStoredUrl: () => localStorage.getItem(LS_URL) || '',
   getUrl: () => localStorage.getItem(LS_URL) || DEFAULT_SCRIPT_URL,
   setUrl: (u) => localStorage.setItem(LS_URL, u),
+  clearStoredUrl: () => localStorage.removeItem(LS_URL),
   hasDefaultUrl: () => Boolean(DEFAULT_SCRIPT_URL),
   getAdminSecret: () => sessionStorage.getItem(SS_ADMIN_SECRET) || '',
   setAdminSecret: (secret) => sessionStorage.setItem(SS_ADMIN_SECRET, secret),
@@ -37,19 +56,30 @@ const API = {
   },
 
   async call(action, payload = {}) {
-    const url = this.getUrl();
+    const storedUrl = this.getStoredUrl();
+    const url = storedUrl || DEFAULT_SCRIPT_URL;
     if (!url) throw new Error('未設定網址');
     const adminSecret = this.getAdminSecret();
     const requestPayload = adminSecret && !Object.prototype.hasOwnProperty.call(payload, '_adminSecret')
       ? { ...payload, _adminSecret: adminSecret }
       : payload;
-    const res = await fetch(url, {
-      method: 'POST',
-      body: JSON.stringify({ action, payload: requestPayload }),
-      redirect: 'follow',
-    });
-    const json = await res.json();
-    if (!json.ok) throw new Error(json.error);
+
+    const tryCall = (targetUrl) => requestAppsScript(targetUrl, action, requestPayload);
+
+    let json;
+    try {
+      json = await tryCall(url);
+    } catch (err) {
+      const canFallback = Boolean(storedUrl) && Boolean(DEFAULT_SCRIPT_URL) && storedUrl !== DEFAULT_SCRIPT_URL;
+      if (canFallback) {
+        this.clearStoredUrl();
+        json = await tryCall(DEFAULT_SCRIPT_URL);
+      } else {
+        throw err;
+      }
+    }
+
+    if (!json.ok) throw new Error(json.error || '連線失敗');
     return json.data;
   },
 
