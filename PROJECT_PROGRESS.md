@@ -1,6 +1,6 @@
 # 施工人員名冊專案進度記錄
 
-最後更新：2026-06-07
+最後更新：2026-06-30
 
 ## 已完成
 - 後端基本驗證已補上（姓名、職稱、包商、身分證、手機、備註長度）
@@ -27,15 +27,26 @@
   - 身分證維持遮罩
   - 手機改為顯示完整號碼，保留前導 `0`
   - 進場日期改為中文格式顯示（例如 `2026-06-06` → `2026年6月6日`）
+- 已修正 Google Sheet 讀值造成的電話前導 `0` 遺失問題
+  - 後端讀表改為優先採用 `getDisplayValues()`
+  - 查詢名單電話可正確保留 `09...`
 - 已完成前三項前端小升級
-  - 查詢頁與管理後台都支援多欄位關鍵字搜尋（姓名、包商、身分證、電話、職稱、備註、進場日期）
+
   - 查詢頁與管理後台都已加入包商篩選、職稱篩選、排序功能
   - 刪除前改為顯示明確預覽與二次確認，並補上更明確的重複資料提示
 - 已新增可測試的名冊整理 helper 模組
   - `src/worker-directory.mjs`
   - `tests/worker-directory.test.mjs`
+- 已新增包商名冊列定位 helper，刪除優先改用穩定 `workerId`
+  - 新包商名冊隱藏欄位加入 `workerId`
+  - 舊 8 欄名冊會自動升級為 9 欄格式
+  - 刪除時先用 `workerId`，舊資料才回退舊比對法
+- 已新增後端搜尋 / 分頁 helper 與公開查詢頁 API 分頁查詢
+  - `src/backend-worker-query.mjs`
+  - `tests/backend-worker-query.test.mjs`
+  - Query 頁改為呼叫 `searchWorkers`，不再只靠前端整包篩選
 - 已補基本自動測試
-- 已補基礎 ESLint 設定與 `npm run lint`
+
 - 已補 `.env.example`
   - 目前收錄前端使用的 `VITE_APPS_SCRIPT_URL`
 - 目前本機 `npm run lint` 通過

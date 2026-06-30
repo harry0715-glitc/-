@@ -20,6 +20,7 @@ import {
 
 // ── Config keys ────────────────────────────────────────────────
 const LS_URL = 'wr_script_url';
+const LS_ADMIN_OVERRIDE_URL = 'wr_admin_override_script_url';
 const SS_ADMIN_SECRET = 'wr_admin_secret';
 const DEFAULT_SCRIPT_URL = import.meta.env.VITE_APPS_SCRIPT_URL || '';
 
@@ -42,20 +43,28 @@ async function requestAppsScript(url, action, payload) {
 
 // ── API ────────────────────────────────────────────────────────
 const API = {
-  getStoredUrl: () => localStorage.getItem(LS_URL) || '',
-  clearStoredUrl: () => localStorage.removeItem(LS_URL),
+  getLegacyUrl: () => localStorage.getItem(LS_URL) || '',
+  clearLegacyUrl: () => localStorage.removeItem(LS_URL),
+  getAdminOverrideUrl: () => localStorage.getItem(LS_ADMIN_OVERRIDE_URL) || '',
+  setAdminOverrideUrl: (u) => localStorage.setItem(LS_ADMIN_OVERRIDE_URL, u),
+  clearAdminOverrideUrl: () => localStorage.removeItem(LS_ADMIN_OVERRIDE_URL),
+  hasAdminOverrideUrl() {
+    return Boolean(this.getAdminOverrideUrl());
+  },
   hasDefaultUrl: () => Boolean(DEFAULT_SCRIPT_URL),
   getUrl() {
-    const storedUrl = this.getStoredUrl();
-    if (DEFAULT_SCRIPT_URL) {
-      if (storedUrl && storedUrl !== DEFAULT_SCRIPT_URL) {
-        this.clearStoredUrl();
-      }
-      return DEFAULT_SCRIPT_URL;
+    const legacyUrl = this.getLegacyUrl();
+    if (legacyUrl) {
+      this.clearLegacyUrl();
     }
-    return storedUrl;
+    return this.getAdminOverrideUrl() || DEFAULT_SCRIPT_URL;
   },
-  setUrl: (u) => localStorage.setItem(LS_URL, u),
+  getUrlMode() {
+    return this.hasAdminOverrideUrl() ? 'admin-override' : 'bundled-default';
+  },
+  getDisplayUrl() {
+    return this.getAdminOverrideUrl() || DEFAULT_SCRIPT_URL || '';
+  },
   getAdminSecret: () => sessionStorage.getItem(SS_ADMIN_SECRET) || '',
   setAdminSecret: (secret) => sessionStorage.setItem(SS_ADMIN_SECRET, secret),
   clearAdminSession: () => sessionStorage.removeItem(SS_ADMIN_SECRET),
@@ -64,9 +73,13 @@ const API = {
     return this.call('getData');
   },
 
+  async searchWorkers(options = {}) {
+    return this.call('searchWorkers', options);
+  },
+
   async call(action, payload = {}) {
-    const storedUrl = this.getStoredUrl();
-    const url = storedUrl || DEFAULT_SCRIPT_URL;
+    const adminOverrideUrl = this.getAdminOverrideUrl();
+    const url = adminOverrideUrl || DEFAULT_SCRIPT_URL;
     if (!url) throw new Error('未設定網址');
     const adminSecret = this.getAdminSecret();
     const requestPayload = adminSecret && !Object.prototype.hasOwnProperty.call(payload, '_adminSecret')
@@ -79,9 +92,9 @@ const API = {
     try {
       json = await tryCall(url);
     } catch (err) {
-      const canFallback = Boolean(storedUrl) && Boolean(DEFAULT_SCRIPT_URL) && storedUrl !== DEFAULT_SCRIPT_URL;
+      const canFallback = Boolean(adminOverrideUrl) && Boolean(DEFAULT_SCRIPT_URL) && adminOverrideUrl !== DEFAULT_SCRIPT_URL;
       if (canFallback) {
-        this.clearStoredUrl();
+        this.clearAdminOverrideUrl();
         json = await tryCall(DEFAULT_SCRIPT_URL);
       } else {
         throw err;
@@ -116,6 +129,7 @@ const WORKER_SORT_OPTIONS = [
   { value: 'contractorAsc', label: '依包商排序' },
   { value: 'entryDateDesc', label: '依進場日期' },
 ];
+const QUERY_PAGE_SIZE = 20;
 
 function formatDateZhTW(value) {
   const text = String(value || '').trim();
@@ -478,7 +492,7 @@ export default function App() {
   }, []);
 
   const loadData = useCallback(async () => {
-    if (!API.getUrl()) { setView('setup'); return; }
+    if (!API.getUrl()) { setView('adminLogin'); return; }
     setView('loading');
     try {
       const { contractors: c, workers: w } = await API.load();
@@ -542,9 +556,9 @@ export default function App() {
       `}</style>
       <Toast {...toast} />
 
-      {view === 'setup'   && <SetupView onDone={loadData} />}
+      {view === 'setup'   && <SetupView onDone={loadData} onCancel={() => setView(adminAuth ? 'admin' : 'adminLogin')} />}
       {view === 'loading' && <LoadingView />}
-      {view === 'error'   && <ErrorView msg={initError} onRetry={loadData} onSetup={() => setView('setup')} />}
+      {view === 'error'   && <ErrorView msg={initError} onRetry={loadData} onSetup={() => setView('adminLogin')} />}
       {view === 'home'    && <HomeView {...shared} />}
       {view === 'register' && <RegisterView {...shared} />}
       {view === 'query'   && <QueryView {...shared} />}
@@ -557,8 +571,8 @@ export default function App() {
 // ══════════════════════════════════════════════════════
 // SETUP VIEW
 // ══════════════════════════════════════════════════════
-function SetupView({ onDone }) {
-  const [url, setUrl] = useState('');
+function SetupView({ onDone, onCancel }) {
+  const [url, setUrl] = useState(API.getAdminOverrideUrl() || API.getDisplayUrl() || '');
   const [testing, setTesting] = useState(false);
   const [error, setError] = useState('');
 
@@ -570,10 +584,11 @@ function SetupView({ onDone }) {
     }
     setTesting(true); setError('');
     try {
-      API.setUrl(trimmed);
+      API.setAdminOverrideUrl(trimmed);
       await API.load();
       onDone();
     } catch (err) {
+      API.clearAdminOverrideUrl();
       setError('連線失敗：' + err.message + '。請確認網址正確且已部署。');
       setTesting(false);
     }
@@ -586,8 +601,8 @@ function SetupView({ onDone }) {
           <div className="w-16 h-16 bg-orange-500/10 border border-orange-500/30 rounded-2xl flex items-center justify-center mx-auto mb-4">
             <Icon name="cloud" cls="w-8 h-8 text-orange-500" />
           </div>
-          <h1 className="text-2xl font-black text-white">連結 Google 雲端</h1>
-          <p className="text-slate-500 text-sm mt-2">貼上 Apps Script 部署網址以啟用</p>
+          <h1 className="text-2xl font-black text-white">管理者調整連線網址</h1>
+          <p className="text-slate-500 text-sm mt-2">前台平時固定使用正式網址；只有管理者可在此臨時覆蓋。</p>
         </div>
 
         <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4 space-y-4">
@@ -606,19 +621,22 @@ function SetupView({ onDone }) {
             disabled={testing || !url.trim()}
             className="w-full bg-gradient-to-r from-orange-600 to-amber-500 disabled:from-slate-700 disabled:to-slate-700 disabled:text-slate-500 text-white rounded-xl py-3.5 font-bold flex items-center justify-center gap-2 active:scale-95 transition-all">
             {testing
-              ? <><Icon name="refresh" cls="w-4 h-4 spin" /> 連線測試中…</>
-              : <><Icon name="link" cls="w-4 h-4" /> 儲存並連線</>}
+              ? <><Icon name="refresh" cls="w-4 h-4 spin" /> 測試並套用中…</>
+              : <><Icon name="link" cls="w-4 h-4" /> 儲存並套用管理者覆蓋網址</>}
+          </button>
+
+          <button onClick={onCancel}
+            className="w-full bg-slate-800 border border-slate-700 text-slate-300 rounded-xl py-3 text-sm font-medium active:scale-95 transition-all">
+            取消
           </button>
         </div>
 
         <div className="mt-6 bg-slate-900 border border-slate-800 rounded-2xl p-4">
-          <p className="text-xs font-bold text-orange-400 mb-3">📋 設定步驟</p>
+          <p className="text-xs font-bold text-orange-400 mb-3">⚠ 使用說明</p>
           {[
-            '前往 script.google.com',
-            '新增專案 → 貼上 Code.js 程式碼',
-            '部署 → 新增部署項目 → 網路應用程式',
-            '執行身分：我、存取對象：任何人',
-            '複製部署網址貼上方',
+            '此設定只供管理者臨時覆蓋正式網址使用。',
+            '一般使用者前台不會看到這個設定入口。',
+            '若覆蓋網址失效，系統會自動回退正式內建網址。',
           ].map((s, i) => (
             <div key={i} className="flex items-start gap-2.5 mb-2 last:mb-0">
               <div className="w-5 h-5 bg-orange-500/20 border border-orange-500/30 rounded-full flex items-center justify-center flex-shrink-0 mt-0.5">
@@ -652,7 +670,7 @@ function ErrorView({ msg, onRetry, onSetup }) {
       <p className="text-slate-500 text-sm mb-8 max-w-xs">{msg}</p>
       <div className="space-y-3 w-full max-w-xs">
         <button onClick={onRetry} className="w-full bg-orange-600 text-white rounded-2xl py-3.5 font-bold active:scale-95 transition-all">重新連線</button>
-        <button onClick={onSetup} className="w-full bg-slate-900 border border-slate-700 text-slate-300 rounded-2xl py-3.5 font-medium">重新設定網址</button>
+        <button onClick={onSetup} className="w-full bg-slate-900 border border-slate-700 text-slate-300 rounded-2xl py-3.5 font-medium">管理者登入後調整網址</button>
       </div>
     </div>
   );
@@ -1015,22 +1033,58 @@ function RegisterView({ setView, contractors, workers, onAddWorker, showToast })
 // ══════════════════════════════════════════════════════
 // QUERY VIEW
 // ══════════════════════════════════════════════════════
-function QueryView({ setView, workers, contractors, loadData }) {
+function QueryView({ setView, workers, contractors }) {
   const [search, setSearch] = useState('');
   const [filterCo, setFilterCo] = useState('');
   const [filterJob, setFilterJob] = useState('');
   const [sortBy, setSortBy] = useState('createdAtDesc');
   const [selected, setSelected] = useState(null);
+  const [pageOffset, setPageOffset] = useState(0);
+  const [reloadKey, setReloadKey] = useState(0);
+  const [pageState, setPageState] = useState({ items: [], total: 0, limit: QUERY_PAGE_SIZE, offset: 0, hasMore: false, loading: true, error: '' });
 
   const jobTitleOptions = useMemo(() => getJobTitleOptions(workers), [workers]);
-  const filtered = useMemo(() => filterAndSortWorkers(workers, contractors, {
-    search,
-    contractorId: filterCo,
-    jobTitle: filterJob,
-    sortBy,
-  }), [workers, contractors, search, filterCo, filterJob, sortBy]);
-
   const getName = (id) => getContractorName(contractors, id);
+
+  useEffect(() => {
+    setPageOffset(0);
+  }, [search, filterCo, filterJob, sortBy]);
+
+  useEffect(() => {
+    let alive = true;
+    setPageState(current => ({ ...current, loading: true, error: '' }));
+
+    API.searchWorkers({
+      search,
+      contractorId: filterCo,
+      jobTitle: filterJob,
+      sortBy,
+      limit: QUERY_PAGE_SIZE,
+      offset: pageOffset,
+    })
+      .then((data) => {
+        if (!alive) return;
+        setPageState({
+          items: data?.items || [],
+          total: Number(data?.total || 0),
+          limit: Number(data?.limit || QUERY_PAGE_SIZE),
+          offset: Number(data?.offset || 0),
+          hasMore: Boolean(data?.hasMore),
+          loading: false,
+          error: '',
+        });
+      })
+      .catch((err) => {
+        if (!alive) return;
+        setPageState(current => ({ ...current, items: [], total: 0, hasMore: false, loading: false, error: err.message || '查詢失敗' }));
+      });
+
+    return () => { alive = false; };
+  }, [search, filterCo, filterJob, sortBy, pageOffset, reloadKey]);
+
+  const filtered = pageState.items;
+  const pageStart = pageState.total === 0 ? 0 : pageState.offset + 1;
+  const pageEnd = Math.min(pageState.offset + filtered.length, pageState.total);
 
   if (selected) return (
     <WorkerDetail worker={selected} contractorName={getName(selected.contractorId)} onBack={() => setSelected(null)} />
@@ -1043,8 +1097,8 @@ function QueryView({ setView, workers, contractors, loadData }) {
           <button onClick={() => setView('home')} className="flex items-center gap-1.5 text-slate-400 text-sm">
             <Icon name="back" cls="w-4 h-4" /> 返回
           </button>
-          <button onClick={loadData} className="ml-auto text-slate-500 hover:text-orange-400 transition-colors p-1">
-            <Icon name="refresh" cls="w-4 h-4" />
+          <button onClick={() => setReloadKey(key => key + 1)} className="ml-auto text-slate-500 hover:text-orange-400 transition-colors p-1">
+            <Icon name="refresh" cls={`w-4 h-4 ${pageState.loading ? 'spin' : ''}`} />
           </button>
         </div>
         <h1 className="text-xl font-black text-white mb-3">人員名冊查詢</h1>
@@ -1069,11 +1123,33 @@ function QueryView({ setView, workers, contractors, loadData }) {
             {WORKER_SORT_OPTIONS.map(option => <option key={option.value} value={option.value}>{option.label}</option>)}
           </select>
         </div>
-        <p className="text-slate-600 text-xs mt-2">顯示 {filtered.length} / 共 {workers.length} 筆</p>
+        <div className="flex items-center justify-between gap-3 mt-2 text-xs">
+          <p className="text-slate-600">顯示 {pageStart} - {pageEnd} / 共 {pageState.total} 筆</p>
+          <div className="flex items-center gap-2">
+            <button disabled={pageState.loading || pageState.offset === 0} onClick={() => setPageOffset(offset => Math.max(0, offset - QUERY_PAGE_SIZE))}
+              className="px-2.5 py-1 rounded-lg border border-slate-700 text-slate-400 disabled:text-slate-600 disabled:border-slate-800">
+              上一頁
+            </button>
+            <button disabled={pageState.loading || !pageState.hasMore} onClick={() => setPageOffset(offset => offset + QUERY_PAGE_SIZE)}
+              className="px-2.5 py-1 rounded-lg border border-slate-700 text-slate-400 disabled:text-slate-600 disabled:border-slate-800">
+              下一頁
+            </button>
+          </div>
+        </div>
       </div>
 
       <div className="px-4 py-3 space-y-2">
-        {filtered.length === 0 ? (
+        {pageState.error ? (
+          <div className="text-center py-20">
+            <Icon name="warning" cls="w-12 h-12 text-red-400 mx-auto mb-4" />
+            <p className="text-red-300 text-sm">{pageState.error}</p>
+          </div>
+        ) : pageState.loading ? (
+          <div className="text-center py-20">
+            <Icon name="refresh" cls="w-12 h-12 text-slate-700 mx-auto mb-4 spin" />
+            <p className="text-slate-500">查詢中…</p>
+          </div>
+        ) : filtered.length === 0 ? (
           <div className="text-center py-20">
             <Icon name="search" cls="w-12 h-12 text-slate-700 mx-auto mb-4" />
             <p className="text-slate-600">查無資料</p>
@@ -1616,7 +1692,7 @@ function AdminWorkersTab({ workers, contractors, onDeleteWorker, showToast }) {
 }
 
 // ── Settings Tab ────────────────────────────────────────────────
-function SettingsTab({ showToast, setView, logoutAdmin }) {
+function SettingsTab({ showToast, setView, logoutAdmin, loadData }) {
   const [currentSecret, setCurrentSecret] = useState('');
   const [nextSecret, setNextSecret] = useState('');
   const [confirmSecret, setConfirmSecret] = useState('');
@@ -1646,14 +1722,20 @@ function SettingsTab({ showToast, setView, logoutAdmin }) {
     }
   };
 
-  const resetUrl = () => {
-    if (!confirm('確定要重新設定 Apps Script 網址？')) return;
-    localStorage.removeItem(LS_URL);
-    if (API.hasDefaultUrl()) {
-      location.reload();
+  const openUrlSetup = () => {
+    if (!confirm('確定要以管理者身分修改 Apps Script 連線網址嗎？這只應在正式網址失效或緊急切換時使用。')) return;
+    setView('setup');
+  };
+
+  const clearAdminOverride = async () => {
+    if (!API.hasAdminOverrideUrl()) {
+      showToast('目前正在使用正式內建網址');
       return;
     }
-    setView('setup');
+    if (!confirm('確定要停用管理者覆蓋網址，恢復使用正式內建網址嗎？')) return;
+    API.clearAdminOverrideUrl();
+    showToast('已恢復正式內建網址');
+    await loadData();
   };
 
   const handleLogout = () => {
@@ -1686,11 +1768,18 @@ function SettingsTab({ showToast, setView, logoutAdmin }) {
 
       <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4">
         <h3 className="font-black text-white mb-3">Google 雲端設定</h3>
-        <p className="text-slate-500 text-xs mb-3">Apps Script 網址：{API.getUrl() ? '✓ 已設定' : '未設定'}</p>
-        <button onClick={resetUrl}
-          className="w-full bg-slate-800 border border-slate-700 text-slate-300 rounded-xl py-3 text-sm font-medium flex items-center justify-center gap-2 active:scale-95 transition-all">
-          <Icon name="link" cls="w-4 h-4" /> 重新設定網址
-        </button>
+        <p className="text-slate-500 text-xs mb-2">目前模式：{API.getUrlMode() === 'admin-override' ? '管理者覆蓋網址' : '正式內建網址'}</p>
+        <p className="text-slate-500 text-xs mb-4 break-all">目前連線：{API.getDisplayUrl() || '未設定'}</p>
+        <div className="space-y-3">
+          <button onClick={openUrlSetup}
+            className="w-full bg-slate-800 border border-slate-700 text-slate-300 rounded-xl py-3 text-sm font-medium flex items-center justify-center gap-2 active:scale-95 transition-all">
+            <Icon name="link" cls="w-4 h-4" /> 修改連線網址（管理者）
+          </button>
+          <button onClick={clearAdminOverride}
+            className="w-full bg-slate-800 border border-slate-700 text-slate-300 rounded-xl py-3 text-sm font-medium flex items-center justify-center gap-2 active:scale-95 transition-all">
+            <Icon name="refresh" cls="w-4 h-4" /> 恢復正式內建網址
+          </button>
+        </div>
       </div>
     </div>
   );

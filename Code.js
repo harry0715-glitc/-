@@ -7,6 +7,7 @@ const ROOT_FOLDER = '施工人員名冊';
 const DB_FILE     = '📋 系統資料庫';
 const ADMIN_USERNAME = 'admin';
 const ADMIN_SECRET_KEY = 'WR_ADMIN_SECRET';
+const CONTRACTOR_SHEET_HEADERS = ['編號', 'workerId', '姓名', '身分證字號', '手機', '職稱', '進場日期', '備註', '登記時間'];
 
 /* ── Entry Points ─────────────────────────────────────────── */
 
@@ -37,6 +38,7 @@ function respond(obj) {
 function run(action, p) {
   switch (action) {
     case 'getData':            return getData();
+    case 'searchWorkers':      return searchWorkers(p);
     case 'adminStatus':        return adminStatus();
     case 'authenticateAdmin':  return authenticateAdmin(p);
     case 'bootstrapAdmin':     return bootstrapAdmin(p);
@@ -189,14 +191,20 @@ function applyHeaderStyle(sheet, cols) {
 }
 
 function readSheet(sheet) {
-  const vals = sheet.getDataRange().getValues();
-  if (vals.length < 2) return [];
-  const headers = vals[0];
-  return vals.slice(1)
+  const range = sheet.getDataRange();
+  const rawVals = range.getValues();
+  const displayVals = range.getDisplayValues();
+  if (rawVals.length < 2) return [];
+  const headers = rawVals[0];
+  return rawVals.slice(1)
     .filter(row => row[0] !== '' && row[0] !== null && row[0] !== undefined)
-    .map(row => {
+    .map((row, rowIndex) => {
       const obj = {};
-      headers.forEach((h, i) => { obj[h] = (row[i] == null) ? '' : String(row[i]); });
+      headers.forEach((h, i) => {
+        const rawValue = row[i];
+        const displayValue = displayVals[rowIndex + 1]?.[i] ?? '';
+        obj[h] = rawValue == null ? '' : String(displayValue || rawValue);
+      });
       return obj;
     });
 }
@@ -214,6 +222,75 @@ function deleteRowById(sheet, id) {
 
 function findContractorById_(contractors, contractorId) {
   return contractors.find(c => String(c.id) === String(contractorId)) || null;
+}
+
+function getContractorName_(contractors, contractorId) {
+  var contractor = findContractorById_(contractors, contractorId);
+  return contractor ? contractor.name : '未知';
+}
+
+function workerMatchesSearch_(worker, contractors, search) {
+  var keyword = normalizeText_(search).toLowerCase();
+  if (!keyword) return true;
+
+  var contractorName = getContractorName_(contractors, worker.contractorId);
+  var textFields = [worker.name, worker.jobTitle, contractorName, worker.notes, worker.entryDate]
+    .map(function(value) { return normalizeText_(value).toLowerCase(); })
+    .filter(Boolean);
+  if (textFields.some(function(value) { return value.indexOf(keyword) >= 0; })) return true;
+
+  var phoneKeyword = normalizePhone_(search);
+  if (phoneKeyword && normalizePhone_(worker.phone).indexOf(phoneKeyword) >= 0) return true;
+
+  var idKeyword = normalizeIdNumber_(search);
+  if (idKeyword && normalizeIdNumber_(worker.idNumber).indexOf(idKeyword) >= 0) return true;
+
+  return false;
+}
+
+function sortWorkers_(workers, contractors, sortBy) {
+  var list = workers.slice();
+  list.sort(function(left, right) {
+    switch (sortBy) {
+      case 'nameAsc':
+        return normalizeText_(left.name).localeCompare(normalizeText_(right.name), 'zh-Hant');
+      case 'contractorAsc':
+        return normalizeText_(getContractorName_(contractors, left.contractorId)).localeCompare(normalizeText_(getContractorName_(contractors, right.contractorId)), 'zh-Hant');
+      case 'entryDateDesc':
+        return new Date(right.entryDate || 0).getTime() - new Date(left.entryDate || 0).getTime();
+      case 'createdAtAsc':
+        return new Date(left.createdAt || 0).getTime() - new Date(right.createdAt || 0).getTime();
+      case 'createdAtDesc':
+      default:
+        return new Date(right.createdAt || 0).getTime() - new Date(left.createdAt || 0).getTime();
+    }
+  });
+  return list;
+}
+
+function filterSortAndPaginateWorkers_(workers, contractors, options) {
+  var search = String(options.search || '');
+  var contractorId = String(options.contractorId || '');
+  var jobTitle = normalizeText_(options.jobTitle || '');
+  var sortBy = String(options.sortBy || 'createdAtDesc');
+  var limit = Math.max(1, Math.min(100, Number(options.limit || 20) || 20));
+  var offset = Math.max(0, Number(options.offset || 0) || 0);
+
+  var filtered = workers.filter(function(worker) {
+    if (contractorId && String(worker.contractorId) !== contractorId) return false;
+    if (jobTitle && normalizeText_(worker.jobTitle) !== jobTitle) return false;
+    return workerMatchesSearch_(worker, contractors, search);
+  });
+
+  var sorted = sortWorkers_(filtered, contractors, sortBy);
+  var items = sorted.slice(offset, offset + limit);
+  return {
+    items: items,
+    total: sorted.length,
+    limit: limit,
+    offset: offset,
+    hasMore: offset + items.length < sorted.length
+  };
 }
 
 function findDuplicateContractorByName_(contractors, name) {
@@ -264,8 +341,14 @@ function sanitizeWorkerForPublic_(worker) {
   });
 }
 
-function buildContractorSheetWorkerMatcher_(worker) {
-  const expected = [
+function normalizeContractorSheetRow_(row) {
+  if (row.length >= 9) return row.slice(0, 9);
+  if (row.length === 8) return [row[0], '', row[1], row[2], row[3], row[4], row[5], row[6], row[7]];
+  return row;
+}
+
+function buildContractorSheetLegacyFingerprint_(worker) {
+  return [
     normalizeText_(worker.name),
     normalizeIdNumber_(worker.idNumber),
     normalizePhone_(worker.phone),
@@ -274,32 +357,40 @@ function buildContractorSheetWorkerMatcher_(worker) {
     normalizeNotes_(worker.notes),
     worker.createdAt ? normalizeText_(new Date(worker.createdAt).toLocaleString('zh-TW')) : ''
   ];
-
-  return function(row) {
-    const actual = [
-      normalizeText_(row[1]),
-      normalizeIdNumber_(row[2]),
-      normalizePhone_(row[3]),
-      normalizeText_(row[4]),
-      normalizeText_(row[5]),
-      normalizeNotes_(row[6]),
-      normalizeText_(row[7])
-    ];
-    return expected.every(function(value, index) {
-      return actual[index] === value;
-    });
-  };
 }
 
-function deleteFirstMatchingDataRow_(sheet, predicate) {
+function buildContractorSheetRowFingerprint_(row) {
+  const normalized = normalizeContractorSheetRow_(row);
+  return [
+    normalizeText_(normalized[2]),
+    normalizeIdNumber_(normalized[3]),
+    normalizePhone_(normalized[4]),
+    normalizeText_(normalized[5]),
+    normalizeText_(normalized[6]),
+    normalizeNotes_(normalized[7]),
+    normalizeText_(normalized[8])
+  ];
+}
+
+function findContractorSheetDeleteRowIndex_(sheet, worker) {
   const vals = sheet.getDataRange().getValues();
-  for (let i = 1; i < vals.length; i++) {
-    if (predicate(vals[i], i + 1)) {
-      sheet.deleteRow(i + 1);
-      return true;
+  const workerId = String(worker.id || '').trim();
+  if (workerId) {
+    for (let i = 1; i < vals.length; i++) {
+      const normalized = normalizeContractorSheetRow_(vals[i]);
+      if (String(normalized[1] || '').trim() === workerId) return i + 1;
     }
   }
-  return false;
+
+  const expected = buildContractorSheetLegacyFingerprint_(worker);
+  for (let i = 1; i < vals.length; i++) {
+    const actual = buildContractorSheetRowFingerprint_(vals[i]);
+    const matched = expected.every(function(value, index) {
+      return actual[index] === value;
+    });
+    if (matched) return i + 1;
+  }
+  return -1;
 }
 
 function sanitizeContractorPayload_(p, contractors) {
@@ -368,6 +459,21 @@ function getData(p) {
   return {
     contractors: contractors,
     workers: canViewSensitive ? workers : workers.map(sanitizeWorkerForPublic_)
+  };
+}
+
+function searchWorkers(p) {
+  const ss = getDb();
+  const contractors = readSheet(ss.getSheetByName('包商'));
+  const workers = readSheet(ss.getSheetByName('人員'));
+  const canViewSensitive = hasAdminAccess_(p && p._adminSecret);
+  const result = filterSortAndPaginateWorkers_(workers, contractors, p || {});
+  return {
+    items: canViewSensitive ? result.items : result.items.map(sanitizeWorkerForPublic_),
+    total: result.total,
+    limit: result.limit,
+    offset: result.offset,
+    hasMore: result.hasMore
   };
 }
 
@@ -471,19 +577,42 @@ function savePhotoToDrive(worker, coName) {
 
 /* ── Per-Contractor Sheet ─────────────────────────────────── */
 
+function ensureContractorSheetStructure_(sheet) {
+  const lastColumn = sheet.getLastColumn();
+  const headerRow = lastColumn > 0 ? sheet.getRange(1, 1, 1, lastColumn).getValues()[0] : [];
+  const isLegacy = headerRow.length === 8 && String(headerRow[1] || '').trim() === '姓名';
+
+  if (isLegacy) {
+    sheet.insertColumnAfter(1);
+  }
+
+  sheet.getRange(1, 1, 1, CONTRACTOR_SHEET_HEADERS.length).setValues([CONTRACTOR_SHEET_HEADERS]);
+  applyHeaderStyle(sheet, CONTRACTOR_SHEET_HEADERS.length);
+  sheet.setColumnWidth(2, 30);
+  sheet.hideColumns(2);
+  sheet.setColumnWidth(3, 80);
+  sheet.setColumnWidth(6, 120);
+}
+
 function ensureContractorSheet(coName) {
   const folder = getContractorFolder(coName);
   const sheetName = coName + ' 人員名冊';
   const it = folder.getFilesByName(sheetName);
-  if (it.hasNext()) return SpreadsheetApp.open(it.next());
+  if (it.hasNext()) {
+    const existing = SpreadsheetApp.open(it.next());
+    const existingSheet = existing.getSheetByName('名冊') || existing.getSheets()[0];
+    ensureContractorSheetStructure_(existingSheet);
+    return existing;
+  }
 
   const ss = SpreadsheetApp.create(sheetName);
   const sheet = ss.getActiveSheet().setName('名冊');
-  const headers = ['編號', '姓名', '身分證字號', '手機', '職稱', '進場日期', '備註', '登記時間'];
-  sheet.appendRow(headers);
-  applyHeaderStyle(sheet, headers.length);
-  sheet.setColumnWidth(2, 80);
-  sheet.setColumnWidth(5, 120);
+  sheet.appendRow(CONTRACTOR_SHEET_HEADERS);
+  applyHeaderStyle(sheet, CONTRACTOR_SHEET_HEADERS.length);
+  sheet.setColumnWidth(2, 30);
+  sheet.hideColumns(2);
+  sheet.setColumnWidth(3, 80);
+  sheet.setColumnWidth(6, 120);
 
   moveToFolder(ss.getId(), folder);
   return ss;
@@ -496,6 +625,7 @@ function appendWorkerToContractorSheet(coName, worker, _photoUrl) {
     const rowNum = sheet.getLastRow(); // (不含標題)
     sheet.appendRow([
       rowNum,
+      String(worker.id || ''),
       worker.name,
       worker.idNumber || '',
       worker.phone || '',
@@ -504,7 +634,8 @@ function appendWorkerToContractorSheet(coName, worker, _photoUrl) {
       worker.notes || '',
       new Date(worker.createdAt).toLocaleString('zh-TW')
     ]);
-    sheet.autoResizeColumns(1, 8);
+    sheet.autoResizeColumns(1, 9);
+    sheet.hideColumns(2);
   } catch (err) {
     console.error('appendWorkerToContractorSheet error:', err);
   }
@@ -514,15 +645,19 @@ function deleteWorkerFromContractorSheet_(coName, worker) {
   try {
     const ss = ensureContractorSheet(coName);
     const sheet = ss.getSheetByName('名冊') || ss.getSheets()[0];
-    const matcher = buildContractorSheetWorkerMatcher_(worker);
-    deleteFirstMatchingDataRow_(sheet, matcher);
+    const rowIndex = findContractorSheetDeleteRowIndex_(sheet, worker);
+    if (rowIndex > 1) {
+      sheet.deleteRow(rowIndex);
+    }
     const lastRow = sheet.getLastRow();
     if (lastRow <= 1) return;
-    const values = sheet.getRange(2, 1, lastRow - 1, 8).getValues();
+    const values = sheet.getRange(2, 1, lastRow - 1, 9).getValues();
     for (let i = 0; i < values.length; i++) {
       values[i][0] = i + 1;
+      if (values[i].length < 9) values[i] = normalizeContractorSheetRow_(values[i]);
     }
-    sheet.getRange(2, 1, values.length, 8).setValues(values);
+    sheet.getRange(2, 1, values.length, 9).setValues(values);
+    sheet.hideColumns(2);
   } catch (err) {
     console.error('deleteWorkerFromContractorSheet error:', err);
   }
