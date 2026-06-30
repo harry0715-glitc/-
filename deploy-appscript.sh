@@ -135,8 +135,36 @@ else
   [[ -n "$VERSION_NUMBER" ]] || { echo "無法解析版本號" >&2; exit 1; }
 fi
 
-echo "==> 3/4 deploy version ${VERSION_NUMBER} to existing live deployment"
-run_cmd "$CLASP_BIN" deploy -i "$DEPLOYMENT_ID" -V "$VERSION_NUMBER" -d "$DESCRIPTION"
+echo "==> 3/4 deploy version ${VERSION_NUMBER}"
+if [[ "$DRY_RUN" == "1" ]]; then
+  if [[ -n "$DEPLOYMENT_ID" ]]; then
+    run_cmd "$CLASP_BIN" deploy -i "$DEPLOYMENT_ID" -V "$VERSION_NUMBER" -d "$DESCRIPTION"
+  else
+    run_cmd "$CLASP_BIN" deploy -V "$VERSION_NUMBER" -d "$DESCRIPTION"
+  fi
+else
+  DEPLOY_OUTPUT=""
+  if [[ -n "$DEPLOYMENT_ID" ]]; then
+    set +e
+    DEPLOY_OUTPUT="$($CLASP_BIN deploy -i "$DEPLOYMENT_ID" -V "$VERSION_NUMBER" -d "$DESCRIPTION" 2>&1)"
+    DEPLOY_EXIT=$?
+    set -e
+    if [[ "$DEPLOY_EXIT" != "0" ]]; then
+      echo "!! redeploy 失敗，改為建立新 deployment"
+      echo "$DEPLOY_OUTPUT"
+      DEPLOY_OUTPUT="$($CLASP_BIN deploy -V "$VERSION_NUMBER" -d "$DESCRIPTION")"
+    fi
+  else
+    DEPLOY_OUTPUT="$($CLASP_BIN deploy -V "$VERSION_NUMBER" -d "$DESCRIPTION")"
+  fi
+  echo "$DEPLOY_OUTPUT"
+  NEW_DEPLOYMENT_ID="$(printf '%s\n' "$DEPLOY_OUTPUT" | grep -oE 'AKfy[a-zA-Z0-9_-]+' | head -1)"
+  [[ -n "$NEW_DEPLOYMENT_ID" ]] || { echo "無法解析 deployment id" >&2; exit 1; }
+  DEPLOYMENT_ID="$NEW_DEPLOYMENT_ID"
+  if [[ -z "$VERIFY_URL" || "$VERIFY_URL" == "$DEFAULT_VERIFY_URL" ]]; then
+    VERIFY_URL="https://script.google.com/macros/s/${DEPLOYMENT_ID}/exec"
+  fi
+fi
 
 echo "==> 4/4 verify"
 if [[ "$VERIFY" == "1" ]]; then
