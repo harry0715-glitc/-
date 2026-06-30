@@ -12,19 +12,16 @@ DEFAULT_DEPLOYMENT_ID="$FALLBACK_DEPLOYMENT_ID"
 DEFAULT_VERIFY_URL="$FALLBACK_VERIFY_URL"
 
 if [[ -f "$CONFIG_FILE" ]]; then
-  while IFS='=' read -r key value; do
-    case "$key" in
-      DEFAULT_DEPLOYMENT_ID) DEFAULT_DEPLOYMENT_ID="$value" ;;
-      DEFAULT_VERIFY_URL) DEFAULT_VERIFY_URL="$value" ;;
-    esac
-  done < <(python - <<'PY' "$CONFIG_FILE"
+  mapfile -t CONFIG_VALUES < <(python - <<'PY' "$CONFIG_FILE"
 import json, sys
 from pathlib import Path
 config = json.loads(Path(sys.argv[1]).read_text(encoding='utf-8'))
-print(f"DEFAULT_DEPLOYMENT_ID={config.get('deploymentId','').strip()}")
-print(f"DEFAULT_VERIFY_URL={config.get('verifyUrl','').strip()}")
+print(config.get('deploymentId', '').strip())
+print(config.get('verifyUrl', '').strip())
 PY
 )
+  [[ -n "${CONFIG_VALUES[0]:-}" ]] && DEFAULT_DEPLOYMENT_ID="${CONFIG_VALUES[0]}"
+  [[ -n "${CONFIG_VALUES[1]:-}" ]] && DEFAULT_VERIFY_URL="${CONFIG_VALUES[1]}"
 fi
 
 DEPLOYMENT_ID="$DEFAULT_DEPLOYMENT_ID"
@@ -138,8 +135,8 @@ else
   [[ -n "$VERSION_NUMBER" ]] || { echo "無法解析版本號" >&2; exit 1; }
 fi
 
-echo "==> 3/4 redeploy version ${VERSION_NUMBER}"
-run_cmd "$CLASP_BIN" redeploy -V "$VERSION_NUMBER" "$DEPLOYMENT_ID"
+echo "==> 3/4 deploy version ${VERSION_NUMBER} to existing live deployment"
+run_cmd "$CLASP_BIN" deploy -i "$DEPLOYMENT_ID" -V "$VERSION_NUMBER" -d "$DESCRIPTION"
 
 echo "==> 4/4 verify"
 if [[ "$VERIFY" == "1" ]]; then

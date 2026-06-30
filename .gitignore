@@ -2,3 +2,6 @@ node_modules/
 dist/
 .env.local
 .env.production.local
+.netlify/
+*.out.log
+*.err.log
