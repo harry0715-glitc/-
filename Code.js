@@ -44,8 +44,10 @@ function run(action, p) {
     case 'bootstrapAdmin':     return bootstrapAdmin(p);
     case 'changeAdminSecret':  return changeAdminSecret(p);
     case 'addContractor':      return addContractor(p);
+    case 'updateContractor':   return updateContractor(p);
     case 'deleteContractor':   return deleteContractor(p);
     case 'addWorker':          return addWorker(p);
+    case 'updateWorker':       return updateWorker(p);
     case 'deleteWorker':       return deleteWorker(p);
     default: throw new Error('Unknown action: ' + action);
   }
@@ -74,7 +76,9 @@ function normalizeIdNumber_(value) {
 }
 
 function normalizePhone_(value) {
-  return String(value || '').replace(/\D/g, '').slice(0, 10);
+  const digits = String(value || '').replace(/\D/g, '').slice(0, 10);
+  if (digits.length === 9 && digits.indexOf('9') === 0) return '0' + digits;
+  return digits;
 }
 
 function normalizeNotes_(value) {
@@ -144,6 +148,22 @@ function getContractorFolder(name) {
   return f;
 }
 
+function renameContractorAssets_(oldName, newName) {
+  if (!oldName || !newName || oldName === newName) return;
+  const root = getRootFolder();
+  const folders = root.getFoldersByName(oldName);
+  if (!folders.hasNext()) return;
+  const folder = folders.next();
+  folder.setName(newName);
+
+  const oldSheetName = oldName + ' 人員名冊';
+  const newSheetName = newName + ' 人員名冊';
+  const files = folder.getFilesByName(oldSheetName);
+  if (files.hasNext()) {
+    files.next().setName(newSheetName);
+  }
+}
+
 function moveToFolder(fileId, folder) {
   const file = DriveApp.getFileById(fileId);
   folder.addFile(file);
@@ -203,7 +223,11 @@ function readSheet(sheet) {
       headers.forEach((h, i) => {
         const rawValue = row[i];
         const displayValue = displayVals[rowIndex + 1]?.[i] ?? '';
-        obj[h] = rawValue == null ? '' : String(displayValue || rawValue);
+        let value = rawValue == null ? '' : String(displayValue || rawValue);
+        if (String(h) === 'phone' || String(h) === '手機') {
+          value = normalizePhone_(value);
+        }
+        obj[h] = value;
       });
       return obj;
     });
@@ -218,6 +242,21 @@ function deleteRowById(sheet, id) {
     }
   }
   return false;
+}
+
+function findRowIndexById_(sheet, id) {
+  const vals = sheet.getDataRange().getValues();
+  for (let i = 1; i < vals.length; i++) {
+    if (String(vals[i][0]) === String(id)) return i + 1;
+  }
+  return -1;
+}
+
+function updateRowById_(sheet, id, values) {
+  const rowIndex = findRowIndexById_(sheet, id);
+  if (rowIndex <= 1) return false;
+  sheet.getRange(rowIndex, 1, 1, values.length).setValues([values]);
+  return true;
 }
 
 function findContractorById_(contractors, contractorId) {
@@ -299,10 +338,18 @@ function findDuplicateContractorByName_(contractors, name) {
   return contractors.find(c => normalizeText_(c.name).toLowerCase() === target) || null;
 }
 
+function findDuplicateContractorByNameExceptId_(contractors, name, excludeId) {
+  const target = normalizeText_(name).toLowerCase();
+  if (!target) return null;
+  return contractors.find(function(c) {
+    return String(c.id) !== String(excludeId) && normalizeText_(c.name).toLowerCase() === target;
+  }) || null;
+}
+
 function findDuplicateWorker_(workers, payload) {
   const idNumber = normalizeIdNumber_(payload.idNumber);
   if (idNumber) {
-    const idMatch = workers.find(worker => normalizeIdNumber_(worker.idNumber) === idNumber);
+    const idMatch = workers.find(worker => normalizeIdNumber_(worker.idNumber) === idNumber && String(worker.id || '') !== String(payload.id || ''));
     if (idMatch) return { type: 'idNumber', worker: idMatch };
   }
 
@@ -312,6 +359,7 @@ function findDuplicateWorker_(workers, payload) {
   if (!contractorId || !name || !phone) return null;
 
   const profileMatch = workers.find(worker => {
+    if (String(worker.id || '') === String(payload.id || '')) return false;
     if (String(worker.contractorId || '').trim() !== contractorId) return false;
     if (normalizeText_(worker.name).toLowerCase() !== name) return false;
     return normalizePhone_(worker.phone) === phone;
@@ -406,6 +454,20 @@ function sanitizeContractorPayload_(p, contractors) {
   };
 }
 
+function sanitizeContractorUpdatePayload_(p, contractors, existingContractor) {
+  if (!existingContractor) throw new Error('找不到要修改的包商');
+  const name = normalizeText_(p.name);
+  if (!name) throw new Error('請輸入包商名稱');
+  if (name.length > 60) throw new Error('包商名稱過長');
+  if (findDuplicateContractorByNameExceptId_(contractors, name, existingContractor.id)) throw new Error('已有相同名稱的包商');
+
+  return {
+    id: String(existingContractor.id),
+    name,
+    createdAt: existingContractor.createdAt || p.createdAt || new Date().toISOString()
+  };
+}
+
 function sanitizeWorkerPayload_(p, contractors, workers) {
   const name = normalizeText_(p.name);
   const jobTitle = normalizeText_(p.jobTitle);
@@ -427,7 +489,7 @@ function sanitizeWorkerPayload_(p, contractors, workers) {
   const contractor = findContractorById_(contractors, contractorId);
   if (!contractor) throw new Error('找不到所屬包商');
 
-  const duplicate = findDuplicateWorker_(workers, { name, contractorId, idNumber, phone });
+  const duplicate = findDuplicateWorker_(workers, { id: p.id, name, contractorId, idNumber, phone });
   if (duplicate) {
     throw new Error(duplicate.type === 'idNumber'
       ? '此身分證字號已存在，請確認是否重複登記'
@@ -447,6 +509,19 @@ function sanitizeWorkerPayload_(p, contractors, workers) {
     photo: p.photo || '',
     createdAt: p.createdAt || new Date().toISOString()
   };
+}
+
+function sanitizeWorkerUpdatePayload_(p, contractors, workers, existingWorker) {
+  if (!existingWorker) throw new Error('找不到要修改的人員資料');
+  const payload = sanitizeWorkerPayload_(Object.assign({}, existingWorker, p, {
+    id: existingWorker.id,
+    createdAt: existingWorker.createdAt,
+    photo: ''
+  }), contractors, workers);
+
+  return Object.assign({}, payload, {
+    photoUrl: existingWorker.photoUrl || ''
+  });
 }
 
 /* ── getData ──────────────────────────────────────────────── */
@@ -493,6 +568,43 @@ function addContractor(p) {
   return { ok: true, contractor: payload };
 }
 
+function updateContractor(p) {
+  requireAdmin_(p._adminSecret);
+  const ss = getDb();
+  const contractorsSheet = ss.getSheetByName('包商');
+  const workersSheet = ss.getSheetByName('人員');
+  const contractors = readSheet(contractorsSheet);
+  const workers = readSheet(workersSheet);
+  const existing = findContractorById_(contractors, p.id);
+  const payload = sanitizeContractorUpdatePayload_(p, contractors, existing);
+
+  if (!updateRowById_(contractorsSheet, payload.id, [payload.id, payload.name, payload.createdAt])) {
+    throw new Error('找不到要修改的包商');
+  }
+
+  if (existing && existing.name !== payload.name) {
+    workers.forEach(function(worker) {
+      if (String(worker.contractorId) !== String(payload.id)) return;
+      updateRowById_(workersSheet, worker.id, [
+        worker.id,
+        worker.name,
+        worker.idNumber || '',
+        normalizePhone_(worker.phone) || '',
+        worker.jobTitle || '',
+        worker.contractorId,
+        payload.name,
+        worker.entryDate || '',
+        worker.notes || '',
+        worker.photoUrl || '',
+        worker.createdAt || ''
+      ]);
+    });
+    renameContractorAssets_(existing.name, payload.name);
+  }
+
+  return { ok: true, contractor: payload };
+}
+
 function deleteContractor(p) {
   requireAdmin_(p._adminSecret);
   const ss = getDb();
@@ -533,6 +645,36 @@ function addWorker(p) {
   appendWorkerToContractorSheet(payload.contractorName, payload, photoUrl);
 
   return { ok: true, photoUrl };
+}
+
+function updateWorker(p) {
+  requireAdmin_(p._adminSecret);
+  const ss = getDb();
+  const workersSheet = ss.getSheetByName('人員');
+  const contractors = readSheet(ss.getSheetByName('包商'));
+  const workers = readSheet(workersSheet);
+  const existing = workers.find(item => String(item.id) === String(p.id));
+  const payload = sanitizeWorkerUpdatePayload_(p, contractors, workers, existing);
+
+  if (!updateRowById_(workersSheet, payload.id, [
+    payload.id,
+    payload.name,
+    payload.idNumber || '',
+    payload.phone || '',
+    payload.jobTitle,
+    payload.contractorId,
+    payload.contractorName,
+    payload.entryDate || '',
+    payload.notes || '',
+    payload.photoUrl || '',
+    payload.createdAt
+  ])) {
+    throw new Error('找不到要修改的人員資料');
+  }
+
+  deleteWorkerFromContractorSheet_(existing.contractorName, existing);
+  appendWorkerToContractorSheet(payload.contractorName, payload, payload.photoUrl || '');
+  return { ok: true, worker: payload };
 }
 
 function deleteWorker(p) {

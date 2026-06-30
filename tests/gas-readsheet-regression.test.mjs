@@ -46,3 +46,25 @@ test('materializeSheetRows falls back to raw value when display value is blank',
     { id: '2', name: '李小美', phone: '0988777666' },
   ]);
 });
+
+test('materializeSheetRows heals legacy 9-digit phone values even when sheet display already lost the leading zero', () => {
+  const rawVals = [
+    ['id', 'name', 'phone'],
+    ['3', '林宗翰', 963620715],
+  ];
+  const displayVals = [
+    ['id', 'name', 'phone'],
+    ['3', '林宗翰', '963620715'],
+  ];
+
+  const rows = materializeSheetRows(rawVals, displayVals).map((row) => ({
+    ...row,
+    phone: String(row.phone || '').replace(/\D/g, '').length === 9 && String(row.phone || '').startsWith('9')
+      ? `0${String(row.phone || '')}`
+      : String(row.phone || ''),
+  }));
+
+  assert.deepEqual(rows, [
+    { id: '3', name: '林宗翰', phone: '0963620715' },
+  ]);
+});

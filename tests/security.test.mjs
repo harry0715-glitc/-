@@ -42,8 +42,10 @@ test('normalizeIdNumber uppercases and removes spaces', () => {
   assert.equal(normalizeIdNumber(' a123 456789 '), 'A123456789');
 });
 
-test('normalizePhone keeps only digits and caps length at 10', () => {
+test('normalizePhone keeps only digits, heals legacy mobile numbers, and caps length at 10', () => {
   assert.equal(normalizePhone('09-1234-5678 ext99'), '0912345678');
+  assert.equal(normalizePhone('912345678'), '0912345678');
+  assert.equal(normalizePhone('963620715'), '0963620715');
 });
 
 test('normalizeNotes trims note text', () => {
@@ -88,7 +90,7 @@ test('sanitizeWorkerForPublic masks id number but keeps phone visible for displa
     id: '1',
     name: '王小明',
     idNumber: 'A123456789',
-    phone: '0912345678',
+    phone: '912345678',
     jobTitle: '水電',
     contractorId: 'c1',
     contractorName: '大林水電',

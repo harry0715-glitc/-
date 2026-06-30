@@ -22,7 +22,9 @@ export function normalizeIdNumber(value = '') {
 }
 
 export function normalizePhone(value = '') {
-  return String(value || '').replace(/\D/g, '').slice(0, 10);
+  const digits = String(value || '').replace(/\D/g, '').slice(0, 10);
+  if (digits.length === 9 && digits.startsWith('9')) return `0${digits}`;
+  return digits;
 }
 
 export function normalizeNotes(value = '') {

@@ -519,6 +519,13 @@ export default function App() {
     await API.call('addContractor', co);
     setContractors(prev => [...prev, co]);
   };
+  const handleUpdateContractor = async (contractor) => {
+    const result = await API.call('updateContractor', contractor);
+    const saved = result?.contractor || contractor;
+    setContractors(prev => prev.map(item => item.id === saved.id ? saved : item));
+    setWorkers(prev => prev.map(worker => worker.contractorId === saved.id ? { ...worker, contractorName: saved.name } : worker));
+    return result;
+  };
   const handleDeleteContractor = async (id) => {
     await API.call('deleteContractor', { id });
     setContractors(prev => prev.filter(c => c.id !== id));
@@ -527,6 +534,12 @@ export default function App() {
     const result = await API.call('addWorker', worker);
     const saved = { ...worker, photo: null, photoUrl: result.photoUrl || '' };
     setWorkers(prev => [...prev, saved]);
+    return result;
+  };
+  const handleUpdateWorker = async (worker) => {
+    const result = await API.call('updateWorker', worker);
+    const saved = { ...(result?.worker || worker), photo: null };
+    setWorkers(prev => prev.map(item => item.id === saved.id ? { ...item, ...saved } : item));
     return result;
   };
   const handleDeleteWorker = async (id) => {
@@ -538,8 +551,10 @@ export default function App() {
     setView, contractors, workers, adminAuth, setAdminAuth,
     showToast, loadData, logoutAdmin,
     onAddContractor: handleAddContractor,
+    onUpdateContractor: handleUpdateContractor,
     onDeleteContractor: handleDeleteContractor,
     onAddWorker: handleAddWorker,
+    onUpdateWorker: handleUpdateWorker,
     onDeleteWorker: handleDeleteWorker,
   };
 
@@ -1180,7 +1195,7 @@ function QueryView({ setView, workers, contractors }) {
 function WorkerDetail({ worker: w, contractorName, onBack }) {
   const rows = [
     { label: '身分證字號', value: w.idNumber ? maskIdNumber(w.idNumber) : '—' },
-    { label: '手機號碼',   value: w.phone || '—' },
+    { label: '手機號碼',   value: normalizePhone(w.phone || '') || '—' },
     { label: '所屬包商',   value: contractorName },
     { label: '進場日期',   value: formatDateZhTW(w.entryDate) },
     { label: '備註',       value: w.notes || '—' },
@@ -1432,11 +1447,19 @@ function AdminView(props) {
 }
 
 // ── Contractors Tab ─────────────────────────────────────────────
-function ContractorsTab({ contractors, workers, onAddContractor, onDeleteContractor, showToast }) {
+function ContractorsTab({ contractors, workers, onAddContractor, onUpdateContractor, onDeleteContractor, showToast }) {
   const [newName, setNewName] = useState('');
   const [adding, setAdding] = useState(false);
   const [saving, setSaving] = useState(false);
   const [pendingDelete, setPendingDelete] = useState(null);
+  const [selected, setSelected] = useState(null);
+  const [editing, setEditing] = useState(false);
+  const [editName, setEditName] = useState('');
+
+  const contractorWorkers = useMemo(() => {
+    if (!selected) return [];
+    return filterAndSortWorkers(workers, contractors, { contractorId: selected.id, sortBy: 'createdAtDesc' });
+  }, [selected, workers, contractors]);
 
   const add = async () => {
     const normalizedName = normalizeText(newName);
@@ -1450,7 +1473,8 @@ function ContractorsTab({ contractors, workers, onAddContractor, onDeleteContrac
       const co = { id: Date.now().toString(), name: normalizedName, createdAt: new Date().toISOString() };
       await onAddContractor(co);
       showToast(`已新增「${normalizedName}」並建立 Drive 資料夾`);
-      setNewName(''); setAdding(false);
+      setNewName('');
+      setAdding(false);
     } catch (err) {
       showToast('新增失敗：' + err.message, 'error');
     } finally {
@@ -1472,12 +1496,128 @@ function ContractorsTab({ contractors, workers, onAddContractor, onDeleteContrac
     }
     try {
       await onDeleteContractor(pendingDelete.id);
+      if (selected?.id === pendingDelete.id) {
+        setSelected(null);
+        setEditing(false);
+      }
       showToast(`已刪除「${pendingDelete.name}」`);
       setPendingDelete(null);
     } catch (err) {
       showToast('刪除失敗：' + err.message, 'error');
     }
   };
+
+  const startEdit = (contractor) => {
+    setSelected(contractor);
+    setEditName(contractor.name || '');
+    setEditing(true);
+  };
+
+  const saveEdit = async () => {
+    if (!selected) return;
+    const normalizedName = normalizeText(editName);
+    if (!normalizedName) {
+      showToast('請輸入包商名稱', 'error');
+      return;
+    }
+    setSaving(true);
+    try {
+      const result = await onUpdateContractor({ ...selected, name: normalizedName });
+      const saved = result?.contractor || { ...selected, name: normalizedName };
+      setSelected(saved);
+      setEditName(saved.name || '');
+      setEditing(false);
+      showToast(`已更新包商「${saved.name}」`);
+    } catch (err) {
+      showToast('更新失敗：' + err.message, 'error');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  if (selected) {
+    return (
+      <div className="space-y-4">
+        <ConfirmDialog
+          open={Boolean(pendingDelete)}
+          title={pendingDelete?.workerCount > 0 ? '目前無法刪除此包商' : '確定刪除此包商？'}
+          description={pendingDelete?.workerCount > 0
+            ? '這個包商底下仍有人員資料，為避免資料關聯錯亂，請先刪除該包商底下的人員。'
+            : '刪除後將移除這筆包商資料。若之後還要使用，需重新建立。'}
+          confirmText={pendingDelete?.workerCount > 0 ? '知道了' : '確認刪除'}
+          cancelText="取消"
+          danger={pendingDelete?.workerCount === 0}
+          details={pendingDelete ? [
+            { label: '包商', value: pendingDelete.name },
+            { label: '建立日', value: pendingDelete.createdAt ? new Date(pendingDelete.createdAt).toLocaleDateString('zh-TW') : '—' },
+            { label: '人員數', value: `${pendingDelete.workerCount} 筆` },
+          ] : []}
+          onCancel={() => setPendingDelete(null)}
+          onConfirm={confirmDelete}
+        />
+
+        <button onClick={() => { setSelected(null); setEditing(false); }} className="flex items-center gap-1.5 text-orange-500 text-sm font-medium">
+          <Icon name="back" cls="w-4 h-4" /> 返回包商列表
+        </button>
+
+        <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4 space-y-4">
+          <div className="flex items-start justify-between gap-3">
+            <div>
+              <h2 className="text-xl font-black text-white">{selected.name}</h2>
+              <p className="text-slate-500 text-xs mt-1">建立日：{selected.createdAt ? new Date(selected.createdAt).toLocaleDateString('zh-TW') : '—'} · 共 {contractorWorkers.length} 人</p>
+            </div>
+            <div className="flex gap-2">
+              <button onClick={() => startEdit(selected)} className="bg-slate-800 border border-slate-700 text-slate-200 rounded-xl px-3 py-2 text-sm font-medium">
+                編輯
+              </button>
+              <button onClick={() => openDeleteDialog(selected)} className="bg-red-500/10 border border-red-500/30 text-red-400 rounded-xl px-3 py-2 text-sm font-medium">
+                刪除
+              </button>
+            </div>
+          </div>
+
+          {editing && (
+            <div className="bg-slate-950/60 border border-orange-500/20 rounded-2xl p-4">
+              <Field label="包商名稱" required>
+                <input autoFocus className={iCls()} value={editName} onChange={e => setEditName(e.target.value)} placeholder="例：大林水電工程行" />
+              </Field>
+              <div className="flex gap-2 mt-3">
+                <button onClick={saveEdit} disabled={saving} className="flex-1 bg-orange-600 text-white rounded-xl py-2.5 text-sm font-bold disabled:opacity-50 flex items-center justify-center gap-2">
+                  {saving ? <><Icon name="refresh" cls="w-4 h-4 spin" /> 更新中…</> : '儲存修改'}
+                </button>
+                <button onClick={() => { setEditing(false); setEditName(selected.name || ''); }} className="flex-1 bg-slate-800 text-slate-400 rounded-xl py-2.5 text-sm">取消</button>
+              </div>
+            </div>
+          )}
+
+          <div>
+            <h3 className="font-black text-white mb-3">此包商所有人員</h3>
+            {contractorWorkers.length === 0 ? (
+              <div className="text-center py-10 bg-slate-950/50 border border-slate-800 rounded-2xl">
+                <Icon name="user" cls="w-10 h-10 text-slate-700 mx-auto mb-3" />
+                <p className="text-slate-600">目前沒有任何人員資料</p>
+              </div>
+            ) : (
+              <div className="space-y-2">
+                {contractorWorkers.map((worker, index) => (
+                  <div key={worker.id} className="bg-slate-950/50 border border-slate-800 rounded-2xl p-3 flex items-center gap-3">
+                    <div className="w-8 h-8 bg-orange-500/10 border border-orange-500/20 rounded-lg flex items-center justify-center flex-shrink-0 text-orange-400 text-xs font-bold">
+                      {index + 1}
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <div className="font-bold text-white text-sm">{worker.name}</div>
+                      <div className="text-orange-400 text-xs mt-0.5">{worker.jobTitle || '—'}</div>
+                      <div className="text-slate-500 text-xs mt-0.5">手機：{normalizePhone(worker.phone || '') || '—'}</div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-4">
@@ -1498,13 +1638,13 @@ function ContractorsTab({ contractors, workers, onAddContractor, onDeleteContrac
         onCancel={() => setPendingDelete(null)}
         onConfirm={confirmDelete}
       />
+
       <div className="flex items-center justify-between">
         <div>
           <h2 className="font-black text-white">承包商管理</h2>
-          <p className="text-slate-500 text-xs">共 {contractors.length} 家 · 新增後自動建立 Drive 資料夾</p>
+          <p className="text-slate-500 text-xs">共 {contractors.length} 家 · 可點進查看人員 / 編輯包商</p>
         </div>
-        <button onClick={() => setAdding(true)}
-          className="bg-orange-600 text-white rounded-xl px-4 py-2 text-sm font-bold flex items-center gap-1.5 active:scale-95 transition-all">
+        <button onClick={() => setAdding(true)} className="bg-orange-600 text-white rounded-xl px-4 py-2 text-sm font-bold flex items-center gap-1.5 active:scale-95 transition-all">
           <Icon name="plus" cls="w-4 h-4" /> 新增
         </button>
       </div>
@@ -1512,11 +1652,9 @@ function ContractorsTab({ contractors, workers, onAddContractor, onDeleteContrac
       {adding && (
         <div className="bg-slate-900 border border-orange-500/30 rounded-2xl p-4">
           <p className="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-2">包商名稱</p>
-          <input autoFocus className={iCls()} placeholder="例：大林水電工程行"
-            value={newName} onChange={e => setNewName(e.target.value)} onKeyDown={e => e.key === 'Enter' && add()} />
+          <input autoFocus className={iCls()} placeholder="例：大林水電工程行" value={newName} onChange={e => setNewName(e.target.value)} onKeyDown={e => e.key === 'Enter' && add()} />
           <div className="flex gap-2 mt-3">
-            <button onClick={add} disabled={saving}
-              className="flex-1 bg-orange-600 text-white rounded-xl py-2.5 text-sm font-bold flex items-center justify-center gap-1.5 disabled:opacity-50">
+            <button onClick={add} disabled={saving} className="flex-1 bg-orange-600 text-white rounded-xl py-2.5 text-sm font-bold flex items-center justify-center gap-1.5 disabled:opacity-50">
               {saving ? <><Icon name="refresh" cls="w-4 h-4 spin" /> 建立中…</> : '確認新增'}
             </button>
             <button onClick={() => { setAdding(false); setNewName(''); }} className="flex-1 bg-slate-800 text-slate-400 rounded-xl py-2.5 text-sm">取消</button>
@@ -1524,39 +1662,44 @@ function ContractorsTab({ contractors, workers, onAddContractor, onDeleteContrac
         </div>
       )}
 
-      {contractors.length === 0
-        ? <div className="text-center py-16"><Icon name="building" cls="w-12 h-12 text-slate-700 mx-auto mb-3" /><p className="text-slate-600">尚未新增任何包商</p></div>
-        : contractors.map((c, i) => {
-          const workerCount = workers.filter((worker) => String(worker.contractorId) === String(c.id)).length;
-          return (
-            <div key={c.id} className="bg-slate-900 border border-slate-800 rounded-2xl px-4 py-3 flex items-center gap-3">
-              <div className="w-8 h-8 bg-orange-500/10 border border-orange-500/20 rounded-lg flex items-center justify-center flex-shrink-0">
-                <span className="text-orange-500 text-xs font-bold">{i + 1}</span>
-              </div>
-              <div className="flex-1 min-w-0">
-                <div className="font-bold text-white text-sm">{c.name}</div>
-                <div className="text-slate-600 text-xs">{c.createdAt ? new Date(c.createdAt).toLocaleDateString('zh-TW') : ''} · {workerCount} 人</div>
-              </div>
-              <button onClick={() => openDeleteDialog(c)} className="text-slate-600 hover:text-red-400 transition-colors p-1.5 rounded-lg hover:bg-red-500/10">
-                <Icon name="trash" cls="w-4 h-4" />
-              </button>
+      {contractors.length === 0 ? (
+        <div className="text-center py-16"><Icon name="building" cls="w-12 h-12 text-slate-700 mx-auto mb-3" /><p className="text-slate-600">尚未新增任何包商</p></div>
+      ) : contractors.map((c, i) => {
+        const workerCount = workers.filter((worker) => String(worker.contractorId) === String(c.id)).length;
+        return (
+          <button key={c.id} onClick={() => { setSelected(c); setEditing(false); }} className="w-full bg-slate-900 border border-slate-800 rounded-2xl px-4 py-3 flex items-center gap-3 text-left hover:border-slate-700 transition-all">
+            <div className="w-8 h-8 bg-orange-500/10 border border-orange-500/20 rounded-lg flex items-center justify-center flex-shrink-0">
+              <span className="text-orange-500 text-xs font-bold">{i + 1}</span>
             </div>
-          );
-        })
-      }
+            <div className="flex-1 min-w-0">
+              <div className="font-bold text-white text-sm">{c.name}</div>
+              <div className="text-slate-600 text-xs">{c.createdAt ? new Date(c.createdAt).toLocaleDateString('zh-TW') : ''} · {workerCount} 人</div>
+            </div>
+            <button onClick={(e) => { e.stopPropagation(); startEdit(c); }} className="text-slate-400 hover:text-orange-400 transition-colors p-1.5 rounded-lg hover:bg-orange-500/10">
+              <Icon name="settings" cls="w-4 h-4" />
+            </button>
+            <button onClick={(e) => { e.stopPropagation(); openDeleteDialog(c); }} className="text-slate-600 hover:text-red-400 transition-colors p-1.5 rounded-lg hover:bg-red-500/10">
+              <Icon name="trash" cls="w-4 h-4" />
+            </button>
+          </button>
+        );
+      })}
     </div>
   );
 }
 
 // ── Admin Workers Tab ───────────────────────────────────────────
-function AdminWorkersTab({ workers, contractors, onDeleteWorker, showToast }) {
+function AdminWorkersTab({ workers, contractors, onUpdateWorker, onDeleteWorker, showToast }) {
   const [search, setSearch] = useState('');
   const [filterCo, setFilterCo] = useState('');
   const [filterJob, setFilterJob] = useState('');
   const [sortBy, setSortBy] = useState('createdAtDesc');
   const [selected, setSelected] = useState(null);
   const [deleting, setDeleting] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [editing, setEditing] = useState(false);
   const [pendingDelete, setPendingDelete] = useState(null);
+  const [form, setForm] = useState({ name: '', idNumber: '', phone: '', jobTitle: '', contractorId: '', entryDate: '', notes: '' });
 
   const getName = (id) => getContractorName(contractors, id);
   const jobTitleOptions = useMemo(() => getJobTitleOptions(workers), [workers]);
@@ -1567,6 +1710,65 @@ function AdminWorkersTab({ workers, contractors, onDeleteWorker, showToast }) {
     sortBy,
   }), [workers, contractors, search, filterCo, filterJob, sortBy]);
 
+  const openWorker = (worker) => {
+    setSelected(worker);
+    setEditing(false);
+    setForm({
+      name: worker.name || '',
+      idNumber: worker.idNumber || '',
+      phone: normalizePhone(worker.phone || ''),
+      jobTitle: worker.jobTitle || '',
+      contractorId: worker.contractorId || '',
+      entryDate: worker.entryDate || '',
+      notes: worker.notes || '',
+    });
+  };
+
+  const setField = (key) => (e) => {
+    let value = e.target.value;
+    if (key === 'idNumber') value = normalizeIdNumber(value);
+    if (key === 'phone') value = normalizePhone(value);
+    if (key === 'notes') value = normalizeNotes(value);
+    setForm((current) => ({ ...current, [key]: value }));
+  };
+
+  const startEdit = () => {
+    if (!selected) return;
+    openWorker(selected);
+    setEditing(true);
+  };
+
+  const saveEdit = async () => {
+    if (!selected) return;
+    if (!normalizeText(form.name)) { showToast('請填寫姓名', 'error'); return; }
+    if (!normalizeText(form.jobTitle)) { showToast('請填寫工作職稱', 'error'); return; }
+    if (!String(form.contractorId || '').trim()) { showToast('請選擇所屬包商', 'error'); return; }
+    if (form.phone && normalizePhone(form.phone).length !== 10) { showToast('手機號碼格式不正確', 'error'); return; }
+
+    setSaving(true);
+    try {
+      const payload = {
+        id: selected.id,
+        name: normalizeText(form.name),
+        idNumber: normalizeIdNumber(form.idNumber),
+        phone: normalizePhone(form.phone),
+        jobTitle: normalizeText(form.jobTitle),
+        contractorId: String(form.contractorId || '').trim(),
+        entryDate: form.entryDate || '',
+        notes: normalizeNotes(form.notes),
+      };
+      const result = await onUpdateWorker(payload);
+      const saved = { ...selected, ...(result?.worker || payload) };
+      setSelected(saved);
+      setEditing(false);
+      showToast(`已更新 ${saved.name} 的資料`);
+    } catch (err) {
+      showToast('更新失敗：' + err.message, 'error');
+    } finally {
+      setSaving(false);
+    }
+  };
+
   const confirmDelete = async () => {
     if (!pendingDelete) return;
     setDeleting(true);
@@ -1575,6 +1777,7 @@ function AdminWorkersTab({ workers, contractors, onDeleteWorker, showToast }) {
       showToast(`已刪除 ${pendingDelete.name}，並同步更新包商名冊`);
       setPendingDelete(null);
       setSelected(null);
+      setEditing(false);
     } catch (err) {
       showToast('刪除失敗：' + err.message, 'error');
     } finally {
@@ -1586,7 +1789,7 @@ function AdminWorkersTab({ workers, contractors, onDeleteWorker, showToast }) {
     const w = selected;
     const rows = [
       { label: '身分證字號', value: w.idNumber || '—' },
-      { label: '手機號碼', value: w.phone || '—' },
+      { label: '手機號碼', value: normalizePhone(w.phone || '') || '—' },
       { label: '所屬包商', value: getName(w.contractorId) },
       { label: '進場日期', value: formatDateZhTW(w.entryDate) },
       { label: '備註', value: w.notes || '—' },
@@ -1605,37 +1808,75 @@ function AdminWorkersTab({ workers, contractors, onDeleteWorker, showToast }) {
           details={pendingDelete ? [
             { label: '姓名', value: pendingDelete.name },
             { label: '包商', value: getName(pendingDelete.contractorId) },
-            { label: '手機', value: pendingDelete.phone || '—' },
+            { label: '手機', value: normalizePhone(pendingDelete.phone || '') || '—' },
             { label: '身分證', value: pendingDelete.idNumber ? maskIdNumber(pendingDelete.idNumber) : '—' },
           ] : []}
           onCancel={() => setPendingDelete(null)}
           onConfirm={confirmDelete}
         />
-        <button onClick={() => setSelected(null)} className="flex items-center gap-1.5 text-orange-500 text-sm font-medium">
+        <button onClick={() => { setSelected(null); setEditing(false); }} className="flex items-center gap-1.5 text-orange-500 text-sm font-medium">
           <Icon name="back" cls="w-4 h-4" /> 返回列表
         </button>
         <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4">
           <div className="flex items-center gap-4 mb-4 pb-4 border-b border-slate-800">
             <div className="w-20 h-24 rounded-xl overflow-hidden bg-slate-800 border border-slate-700 flex items-center justify-center flex-shrink-0">
-              {w.photoUrl
-                ? <img src={w.photoUrl} className="w-full h-full object-cover" alt={w.name} />
-                : <Icon name="user" cls="w-9 h-9 text-slate-600" />}
+              {w.photoUrl ? <img src={w.photoUrl} className="w-full h-full object-cover" alt={w.name} /> : <Icon name="user" cls="w-9 h-9 text-slate-600" />}
             </div>
-            <div>
+            <div className="flex-1 min-w-0">
               <h2 className="text-xl font-black text-white">{w.name}</h2>
               <span className="inline-block mt-1 px-2 py-0.5 bg-orange-500/15 border border-orange-500/30 rounded-lg text-orange-400 text-xs font-semibold">{w.jobTitle}</span>
             </div>
           </div>
-          {rows.map((r, i) => (
-            <div key={i} className={`flex py-3 ${i < rows.length - 1 ? 'border-b border-slate-800/60' : ''}`}>
-              <div className="w-24 text-xs text-slate-500 flex-shrink-0 pt-0.5">{r.label}</div>
-              <div className="text-sm text-slate-200 font-medium flex-1">{r.value}</div>
+
+          {editing ? (
+            <div className="space-y-3">
+              <Field label="姓名" required>
+                <input className={iCls()} value={form.name} onChange={setField('name')} />
+              </Field>
+              <Field label="身分證字號">
+                <input className={iCls()} value={form.idNumber} onChange={setField('idNumber')} placeholder="例：A123456789" />
+              </Field>
+              <Field label="手機號碼">
+                <input type="tel" className={iCls()} value={form.phone} onChange={setField('phone')} placeholder="09XXXXXXXX" />
+              </Field>
+              <Field label="工作職稱" required>
+                <input className={iCls()} value={form.jobTitle} onChange={setField('jobTitle')} />
+              </Field>
+              <Field label="所屬包商" required>
+                <select className={iCls()} value={form.contractorId} onChange={setField('contractorId')}>
+                  <option value="">請選擇包商</option>
+                  {contractors.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+                </select>
+              </Field>
+              <Field label="進場日期">
+                <input type="date" className={iCls()} value={form.entryDate} onChange={setField('entryDate')} />
+              </Field>
+              <Field label="備註">
+                <textarea className={iCls()} rows={3} value={form.notes} onChange={setField('notes')} />
+              </Field>
+              <div className="flex gap-2 pt-2">
+                <button onClick={saveEdit} disabled={saving} className="flex-1 bg-orange-600 text-white rounded-xl py-3 text-sm font-bold disabled:opacity-50 flex items-center justify-center gap-2">
+                  {saving ? <><Icon name="refresh" cls="w-4 h-4 spin" /> 儲存中…</> : '儲存修改'}
+                </button>
+                <button onClick={() => setEditing(false)} className="flex-1 bg-slate-800 text-slate-400 rounded-xl py-3 text-sm">取消</button>
+              </div>
             </div>
-          ))}
-          <button onClick={() => setPendingDelete(w)} disabled={deleting}
-            className="w-full mt-4 bg-red-500/10 border border-red-500/30 text-red-400 rounded-xl py-3 text-sm font-semibold flex items-center justify-center gap-2 active:scale-95 transition-all disabled:opacity-50">
-            <Icon name="trash" cls="w-4 h-4" /> 刪除此人員資料
-          </button>
+          ) : (
+            <>
+              {rows.map((r, i) => (
+                <div key={i} className={`flex py-3 ${i < rows.length - 1 ? 'border-b border-slate-800/60' : ''}`}>
+                  <div className="w-24 text-xs text-slate-500 flex-shrink-0 pt-0.5">{r.label}</div>
+                  <div className="text-sm text-slate-200 font-medium flex-1">{r.value}</div>
+                </div>
+              ))}
+              <div className="grid grid-cols-2 gap-2 mt-4">
+                <button onClick={startEdit} className="bg-slate-800 border border-slate-700 text-slate-200 rounded-xl py-3 text-sm font-semibold">編輯人員資料</button>
+                <button onClick={() => setPendingDelete(w)} disabled={deleting} className="bg-red-500/10 border border-red-500/30 text-red-400 rounded-xl py-3 text-sm font-semibold flex items-center justify-center gap-2 disabled:opacity-50">
+                  <Icon name="trash" cls="w-4 h-4" /> 刪除此人員資料
+                </button>
+              </div>
+            </>
+          )}
         </div>
       </div>
     );
@@ -1649,44 +1890,36 @@ function AdminWorkersTab({ workers, contractors, onDeleteWorker, showToast }) {
       </div>
       <div className="relative">
         <Icon name="search" cls="w-4 h-4 text-slate-500 absolute left-3.5 top-1/2 -translate-y-1/2" />
-        <input className="w-full bg-slate-900 border border-slate-700 rounded-xl pl-10 pr-4 py-2.5 text-slate-200 placeholder-slate-500 text-sm focus:outline-none focus:border-orange-500/50"
-          placeholder="搜尋姓名、包商、身分證、電話、職稱、備註…" value={search} onChange={e => setSearch(e.target.value)} />
+        <input className="w-full bg-slate-900 border border-slate-700 rounded-xl pl-10 pr-4 py-2.5 text-slate-200 placeholder-slate-500 text-sm focus:outline-none focus:border-orange-500/50" placeholder="搜尋姓名、包商、身分證、電話、職稱、備註…" value={search} onChange={e => setSearch(e.target.value)} />
       </div>
       <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
-        <select className="w-full bg-slate-900 border border-slate-700 rounded-xl px-4 py-2.5 text-slate-300 text-sm focus:outline-none"
-          value={filterCo} onChange={e => setFilterCo(e.target.value)}>
+        <select className="w-full bg-slate-900 border border-slate-700 rounded-xl px-4 py-2.5 text-slate-300 text-sm focus:outline-none" value={filterCo} onChange={e => setFilterCo(e.target.value)}>
           <option value="">全部包商</option>
           {contractors.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
         </select>
-        <select className="w-full bg-slate-900 border border-slate-700 rounded-xl px-4 py-2.5 text-slate-300 text-sm focus:outline-none"
-          value={filterJob} onChange={e => setFilterJob(e.target.value)}>
+        <select className="w-full bg-slate-900 border border-slate-700 rounded-xl px-4 py-2.5 text-slate-300 text-sm focus:outline-none" value={filterJob} onChange={e => setFilterJob(e.target.value)}>
           <option value="">全部職稱</option>
           {jobTitleOptions.map(job => <option key={job} value={job}>{job}</option>)}
         </select>
-        <select className="w-full bg-slate-900 border border-slate-700 rounded-xl px-4 py-2.5 text-slate-300 text-sm focus:outline-none"
-          value={sortBy} onChange={e => setSortBy(e.target.value)}>
+        <select className="w-full bg-slate-900 border border-slate-700 rounded-xl px-4 py-2.5 text-slate-300 text-sm focus:outline-none" value={sortBy} onChange={e => setSortBy(e.target.value)}>
           {WORKER_SORT_OPTIONS.map(option => <option key={option.value} value={option.value}>{option.label}</option>)}
         </select>
       </div>
-      {filtered.length === 0
-        ? <div className="text-center py-12"><Icon name="user" cls="w-12 h-12 text-slate-700 mx-auto mb-3" /><p className="text-slate-600">查無人員資料</p></div>
-        : filtered.map(w => (
-          <button key={w.id} onClick={() => setSelected(w)}
-            className="w-full bg-slate-900 border border-slate-800 rounded-2xl p-3 flex items-center gap-3 text-left active:scale-95 transition-all hover:border-slate-700">
-            <div className="w-12 h-14 rounded-xl overflow-hidden bg-slate-800 border border-slate-700 flex-shrink-0 flex items-center justify-center">
-              {w.photoUrl
-                ? <img src={w.photoUrl} className="w-full h-full object-cover" alt={w.name} />
-                : <Icon name="user" cls="w-6 h-6 text-slate-600" />}
-            </div>
-            <div className="flex-1 min-w-0">
-              <div className="font-bold text-white text-sm">{w.name}</div>
-              <div className="text-orange-400 text-xs">{w.jobTitle}</div>
-              <div className="text-slate-500 text-xs">{getName(w.contractorId)}</div>
-            </div>
-            <Icon name="chevron" cls="w-4 h-4 text-slate-600 flex-shrink-0" />
-          </button>
-        ))
-      }
+      {filtered.length === 0 ? (
+        <div className="text-center py-12"><Icon name="user" cls="w-12 h-12 text-slate-700 mx-auto mb-3" /><p className="text-slate-600">查無人員資料</p></div>
+      ) : filtered.map(w => (
+        <button key={w.id} onClick={() => openWorker(w)} className="w-full bg-slate-900 border border-slate-800 rounded-2xl p-3 flex items-center gap-3 text-left active:scale-95 transition-all hover:border-slate-700">
+          <div className="w-12 h-14 rounded-xl overflow-hidden bg-slate-800 border border-slate-700 flex-shrink-0 flex items-center justify-center">
+            {w.photoUrl ? <img src={w.photoUrl} className="w-full h-full object-cover" alt={w.name} /> : <Icon name="user" cls="w-6 h-6 text-slate-600" />}
+          </div>
+          <div className="flex-1 min-w-0">
+            <div className="font-bold text-white text-sm">{w.name}</div>
+            <div className="text-orange-400 text-xs">{w.jobTitle}</div>
+            <div className="text-slate-500 text-xs">{getName(w.contractorId)}</div>
+          </div>
+          <Icon name="chevron" cls="w-4 h-4 text-slate-600 flex-shrink-0" />
+        </button>
+      ))}
     </div>
   );
 }
