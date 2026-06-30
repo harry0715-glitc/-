@@ -1,6 +1,4 @@
 node_modules/
 dist/
-*.log
-
-# Local Netlify folder
-.netlify
+.env.local
+.env.production.local

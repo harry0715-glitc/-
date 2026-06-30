@@ -1,7 +1,8 @@
 {
   "scripts": {
+    "predev": "node scripts/sync-apps-script-env.mjs",
     "dev": "vite --host 0.0.0.0",
-    "build": "vite build",
+    "build": "node scripts/sync-apps-script-env.mjs && vite build",
     "preview": "vite preview --host 0.0.0.0",
     "lint": "eslint .",
     "test": "node --test"

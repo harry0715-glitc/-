@@ -2,10 +2,31 @@
 set -euo pipefail
 
 CLASP_BIN="${CLASP_BIN:-/c/Users/楓根/AppData/Roaming/npm/clasp}"
-DEFAULT_DEPLOYMENT_ID="AKfycbyDG624ArloMf42My3_Qd0Iop_Ey7saVwZFKCJsd25nlF2ha9enJ2BLS9vmBbBUidc"
-DEFAULT_VERIFY_URL="https://script.google.com/macros/s/AKfycbyDG624ArloMf42My3_Qd0Iop_Ey7saVwZFKCJsd25nlF2ha9enJ2BLS9vmBbBUidc/exec"
+FALLBACK_DEPLOYMENT_ID="AKfycbyDG624ArloMf42My3_Qd0Iop_Ey7saVwZFKCJsd25nlF2ha9enJ2BLS9vmBbBUidc"
+FALLBACK_VERIFY_URL="https://script.google.com/macros/s/AKfycbyDG624ArloMf42My3_Qd0Iop_Ey7saVwZFKCJsd25nlF2ha9enJ2BLS9vmBbBUidc/exec"
 
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CONFIG_FILE="$PROJECT_DIR/apps-script.config.json"
+SYNC_ENV_SCRIPT="$PROJECT_DIR/scripts/sync-apps-script-env.mjs"
+DEFAULT_DEPLOYMENT_ID="$FALLBACK_DEPLOYMENT_ID"
+DEFAULT_VERIFY_URL="$FALLBACK_VERIFY_URL"
+
+if [[ -f "$CONFIG_FILE" ]]; then
+  while IFS='=' read -r key value; do
+    case "$key" in
+      DEFAULT_DEPLOYMENT_ID) DEFAULT_DEPLOYMENT_ID="$value" ;;
+      DEFAULT_VERIFY_URL) DEFAULT_VERIFY_URL="$value" ;;
+    esac
+  done < <(python - <<'PY' "$CONFIG_FILE"
+import json, sys
+from pathlib import Path
+config = json.loads(Path(sys.argv[1]).read_text(encoding='utf-8'))
+print(f"DEFAULT_DEPLOYMENT_ID={config.get('deploymentId','').strip()}")
+print(f"DEFAULT_VERIFY_URL={config.get('verifyUrl','').strip()}")
+PY
+)
+fi
+
 DEPLOYMENT_ID="$DEFAULT_DEPLOYMENT_ID"
 VERIFY_URL="$DEFAULT_VERIFY_URL"
 VERIFY=1
@@ -130,6 +151,26 @@ if [[ "$VERIFY" == "1" ]]; then
   fi
 else
   echo "略過驗證"
+fi
+
+if [[ "$DRY_RUN" != "1" ]]; then
+  echo "==> sync frontend Apps Script config"
+  python - <<'PY' "$CONFIG_FILE" "$DEPLOYMENT_ID" "$VERIFY_URL"
+import json, sys
+from pathlib import Path
+config_path = Path(sys.argv[1])
+deployment_id = sys.argv[2].strip()
+verify_url = sys.argv[3].strip()
+config = {}
+if config_path.exists():
+    config = json.loads(config_path.read_text(encoding='utf-8'))
+config['deploymentId'] = deployment_id
+config['verifyUrl'] = verify_url
+config_path.write_text(json.dumps(config, ensure_ascii=False, indent=2) + "\n", encoding='utf-8')
+PY
+  if [[ -f "$SYNC_ENV_SCRIPT" ]]; then
+    node "$SYNC_ENV_SCRIPT"
+  fi
 fi
 
 echo "完成。"
