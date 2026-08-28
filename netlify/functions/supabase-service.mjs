@@ -3,7 +3,6 @@ import { randomUUID } from 'node:crypto';
 import {
   SupabaseError,
   isSupabaseConfigured,
-  supabaseCreateSignedPhotoUrl,
   supabaseCreateSignedObjectUrl,
   supabaseDeletePhoto,
   supabaseDownloadPhoto,
@@ -15,6 +14,10 @@ import {
   supabaseUploadPhoto,
   supabaseUpsert,
 } from './supabase-client.mjs';
+import {
+  createSupabaseRosterPdf,
+  ReportGenerationError,
+} from './pdf-report.mjs';
 
 const MAX_PHOTO_CHARACTERS = 8_100_000;
 const MAX_PREVIEW_BYTES = 2_500_000;
@@ -342,7 +345,7 @@ export async function getWorkerPhotoFromSupabase(input, actor) {
   throw new UserInputError('此人員沒有照片');
 }
 
-export async function generateReportFromSupabase(input, actor, callGas) {
+export async function generateReportFromSupabase(input, actor) {
   const type = String(input.type || '');
   if (type !== 'daily' && type !== 'company') throw new UserInputError('報表類型不正確');
   const date = type === 'daily' ? requireDate(input.date, '報表日期') : '';
@@ -381,33 +384,34 @@ export async function generateReportFromSupabase(input, actor, callGas) {
     || String(left.contractorName).localeCompare(String(right.contractorName), 'zh-Hant')
     || String(left.name).localeCompare(String(right.name), 'zh-Hant')
   ));
-  const workersWithSignedUrls = await Promise.all(workers.map(async (worker) => {
-    if (!worker.photoStoragePath) return worker;
-    try {
-      return {
-        ...worker,
-        photoSignedUrl: await supabaseCreateSignedPhotoUrl(worker.photoStoragePath, 300),
-      };
-    } catch (error) {
-      throw new UserInputError(`照片連結產生失敗：${worker.name}`);
-    }
-  }));
-
-  const missingPhoto = workersWithSignedUrls.find((worker) => (
-    !worker.photoSignedUrl && !worker.photoFileId
-  ));
-  if (missingPhoto) {
-    throw new UserInputError(`「${missingPhoto.name}」的照片資料不存在，請先重新上傳照片`);
-  }
-
-  return callGas('adminGenerateReportFromPayload', {
+  const report = {
     type,
     date,
-    contractorId: selectedContractor?.id || '',
-    primaryContractor,
-    contractor: selectedContractor,
-    workers: workersWithSignedUrls,
-  });
+    reportName: type === 'daily' ? '每日新增人員名冊' : '公司完整人員名冊',
+    scopeLabel: type === 'daily'
+      ? (actor.role === 'contractor'
+        ? `次承包商：${actor.contractorName}`
+        : '全部公司（含主承包商與次承包商）')
+      : (selectedContractor.companyType === 'primary'
+        ? `主承包商自有人員：${selectedContractor.name}`
+        : `次承包商人員：${selectedContractor.name}`),
+    dataBasis: type === 'daily'
+      ? `登記日期：${date}`
+      : `資料截至：${new Date().toISOString()}`,
+    filenameLabel: type === 'daily'
+      ? `每日新增_${date}${actor.role === 'contractor' ? `_${actor.contractorName}` : ''}`
+      : `公司完整名冊_${selectedContractor.name}`,
+    primaryContractorName: primaryContractor.name,
+  };
+
+  try {
+    return await createSupabaseRosterPdf({ report, workers });
+  } catch (error) {
+    if (error instanceof ReportGenerationError) {
+      throw new UserInputError(error.message);
+    }
+    throw error;
+  }
 }
 
 export async function syncBundleToSupabase(bundle) {

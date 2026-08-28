@@ -249,9 +249,7 @@ async function handler(event) {
           result = null;
         }
       } else if (request.action === "adminGenerateReport") {
-        result = await generateReportFromSupabase(payload, supabaseActor, async (action, gasPayload) => {
-          return callGasAction(config, action, gasPayload, actorToken, REPORT_TIMEOUT_MS);
-        });
+        result = await generateReportFromSupabase(payload, supabaseActor);
       } else if (request.action === "adminCreateBackup") {
         result = await createSupabaseBackup(supabaseActor);
       }

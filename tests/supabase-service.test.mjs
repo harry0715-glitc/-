@@ -109,10 +109,14 @@ test('Supabase admin data preserves contractor scoping and existing field names'
   assert.equal(result.workers[0].hasPhoto, true);
 });
 
-test('Supabase reports pass a signed private photo URL to Apps Script', async () => {
+test('Supabase reports generate a PDF directly and embed a private photo', async () => {
   enableSupabase();
-  let gasPayload = null;
-  globalThis.fetch = async (url) => {
+  let uploadedReport = null;
+  const tinyPng = Buffer.from(
+    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=',
+    'base64'
+  );
+  globalThis.fetch = async (url, options = {}) => {
     const text = String(url);
     if (text.includes('/contractors?')) {
       return new Response(JSON.stringify([
@@ -141,9 +145,22 @@ test('Supabase reports pass a signed private photo URL to Apps Script', async ()
         },
       ]), { status: 200 });
     }
-    if (text.includes('/storage/v1/object/sign/worker-photos/')) {
+    if (text.includes('/storage/v1/object/worker-photos/')) {
+      return new Response(tinyPng, {
+        status: 200,
+        headers: { 'Content-Type': 'image/png' },
+      });
+    }
+    if (text.endsWith('/storage/v1/bucket')) {
+      return new Response('{}', { status: 200 });
+    }
+    if (text.includes('/storage/v1/object/registry-reports/')) {
+      uploadedReport = Buffer.from(options.body);
+      return new Response('{}', { status: 200 });
+    }
+    if (text.includes('/storage/v1/object/sign/registry-reports/')) {
       return new Response(JSON.stringify({
-        signedURL: '/storage/v1/object/sign/worker-photos/main-1/worker-1.jpg?token=test',
+        signedURL: '/storage/v1/object/sign/registry-reports/reports/report.pdf?token=test',
       }), { status: 200 });
     }
     throw new Error(`Unexpected request: ${text}`);
@@ -152,16 +169,12 @@ test('Supabase reports pass a signed private photo URL to Apps Script', async ()
   const result = await generateReportFromSupabase(
     { type: 'daily', date: '2026-08-28' },
     { id: 'owner-1', role: 'owner', email: 'owner@example.com' },
-    async (action, payload) => {
-      assert.equal(action, 'adminGenerateReportFromPayload');
-      gasPayload = payload;
-      return { fileId: 'report-1' };
-    }
   );
 
-  assert.equal(result.fileId, 'report-1');
-  assert.match(gasPayload.workers[0].photoSignedUrl, /storage\/v1\/object\/sign\/worker-photos/);
-  assert.equal(gasPayload.workers[0].photoStoragePath, 'main-1/worker-1.jpg');
+  assert.equal(result.source, 'supabase');
+  assert.match(result.url, /^https:\/\/example\.supabase\.co\//);
+  assert.match(result.filename, /每日新增_2026-08-28\.pdf$/);
+  assert.ok(uploadedReport?.subarray(0, 4).equals(Buffer.from('%PDF')));
 });
 
 test('Supabase reports stop instead of silently creating a roster without a required photo', async () => {
@@ -193,9 +206,8 @@ test('Supabase reports stop instead of silently creating a roster without a requ
     () => generateReportFromSupabase(
       { type: 'daily', date: '2026-08-28' },
       { id: 'owner-1', role: 'owner', email: 'owner@example.com' },
-      async () => ({})
     ),
-    /王小明.*照片資料不存在/
+    /王小明.*Supabase 照片/
   );
 });
 
