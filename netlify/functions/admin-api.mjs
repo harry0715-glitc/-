@@ -1,6 +1,7 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
 
 import { SupabaseError, isSupabaseConfigured, isSupabaseEnabled } from "./supabase-client.mjs";
+import { photoFromDataUrl } from "./pdf-report.mjs";
 import {
   addContractorInSupabase,
   createWorkerInSupabase,
@@ -230,8 +231,17 @@ async function handler(event) {
       const synced = await syncBundleToSupabase(migrationBody.data);
       return jsonResponse(200, { ok: true, data: synced });
     } catch (error) {
-      return supabaseErrorResponse(error);
+      return supabaseErrorResponse(error, request.action);
     }
+  }
+
+  // Reports should never silently fall back to the slower Google PDF path
+  // while Supabase is active, because that path can require DocumentApp access.
+  if (isSupabaseEnabled() && request.action === "adminGenerateReport" && !supabaseActor) {
+    return jsonResponse(503, {
+      ok: false,
+      error: "Supabase 管理工作階段尚未同步，請先登出管理後台，再重新登入"
+    });
   }
 
   if (supabaseActor && SUPABASE_FAST_ACTIONS.has(request.action)) {
@@ -253,7 +263,20 @@ async function handler(event) {
           result = null;
         }
       } else if (request.action === "adminGenerateReport") {
-        result = await generateReportFromSupabase(payload, supabaseActor);
+        result = await generateReportFromSupabase(payload, supabaseActor, {
+          // Only migrated records with a legacy Drive photo use this bridge.
+          // New records stay entirely on Supabase.
+          legacyPhotoLoader: async (worker) => {
+            const photo = await callGasAction(
+              config,
+              "adminGetPhoto",
+              { id: worker.id },
+              actorToken,
+              UPSTREAM_TIMEOUT_MS
+            );
+            return photoFromDataUrl(photo?.dataUrl);
+          }
+        });
       } else if (request.action === "adminCreateBackup") {
         result = await createSupabaseBackup(supabaseActor);
       }
@@ -261,7 +284,8 @@ async function handler(event) {
         return jsonResponse(200, { ok: true, data: result });
       }
     } catch (error) {
-      return supabaseErrorResponse(error);
+      if (request.action === "adminGenerateReport") logSupabaseFailure(request.action, error);
+      return supabaseErrorResponse(error, request.action);
     }
   }
 
@@ -510,7 +534,7 @@ function prepareUpstreamPayload(action, payload) {
   return next;
 }
 
-function supabaseErrorResponse(error) {
+function supabaseErrorResponse(error, action = "") {
   if (error instanceof UserInputError) {
     return jsonResponse(400, { ok: false, error: error.message });
   }
@@ -524,13 +548,17 @@ function supabaseErrorResponse(error) {
     if (error.status === 401 || error.status === 403) {
       return jsonResponse(502, {
         ok: false,
-        error: "Supabase 伺服器密鑰無效或沒有權限"
+        error: action === "adminGenerateReport"
+          ? "PDF 儲存服務沒有權限，請確認 Netlify 的 SUPABASE_SERVICE_ROLE_KEY"
+          : "Supabase 伺服器密鑰無效或沒有權限"
       });
     }
     if (error.status === 404) {
       return jsonResponse(502, {
         ok: false,
-        error: "Supabase 資料表尚未建立，請確認已執行資料庫設定"
+        error: action === "adminGenerateReport"
+          ? "PDF 或照片儲存空間不存在，請確認 Supabase Storage 已建立 worker-photos 與 registry-reports"
+          : "Supabase 資料表尚未建立，請確認已執行資料庫設定"
       });
     }
     if (error.status === 504) {
@@ -539,8 +567,49 @@ function supabaseErrorResponse(error) {
         error: "Supabase 連線逾時，請稍後再試"
       });
     }
+    if (error.status === 502) {
+      return jsonResponse(502, {
+        ok: false,
+        error: action === "adminGenerateReport"
+          ? "PDF 儲存服務暫時無法連線，請稍後再試"
+          : "Supabase 暫時無法連線，請稍後再試"
+      });
+    }
+    if (error.status >= 400 && error.status < 500) {
+      const detail = safeSupabaseDetail(error.message);
+      return jsonResponse(502, {
+        ok: false,
+        error: action === "adminGenerateReport"
+          ? `PDF 儲存失敗：${detail}`
+          : `Supabase 操作失敗：${detail}`
+      });
+    }
+  }
+  if (action === "adminGenerateReport") {
+    return jsonResponse(502, {
+      ok: false,
+      error: "PDF 產生失敗，請稍後再試；若持續發生，請重新部署 Netlify"
+    });
   }
   return errorResponse(502);
+}
+
+function logSupabaseFailure(action, error) {
+  console.error(`[${action}]`, {
+    name: error?.name || "Error",
+    message: String(error?.message || error).slice(0, 300),
+    status: error?.status || null,
+    code: error?.code || "",
+    stack: error?.stack || "",
+  });
+}
+
+function safeSupabaseDetail(value) {
+  const detail = String(value || "Supabase 操作失敗")
+    .replace(/[\r\n]+/g, " ")
+    .trim()
+    .slice(0, 180);
+  return detail || "Supabase 操作失敗";
 }
 
 function safeMigrationError(value) {

@@ -379,7 +379,7 @@ export async function getWorkerPhotoFromSupabase(input, actor) {
   throw new UserInputError('此人員沒有照片');
 }
 
-export async function generateReportFromSupabase(input, actor) {
+export async function generateReportFromSupabase(input, actor, options = {}) {
   const type = String(input.type || '');
   if (type !== 'daily' && type !== 'company') throw new UserInputError('報表類型不正確');
   const date = type === 'daily' ? requireDate(input.date, '報表日期') : '';
@@ -439,7 +439,11 @@ export async function generateReportFromSupabase(input, actor) {
   };
 
   try {
-    return await createSupabaseRosterPdf({ report, workers });
+    return await createSupabaseRosterPdf({
+      report,
+      workers,
+      legacyPhotoLoader: options.legacyPhotoLoader,
+    });
   } catch (error) {
     if (error instanceof ReportGenerationError) {
       throw new UserInputError(error.message);

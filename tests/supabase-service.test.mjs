@@ -243,6 +243,72 @@ test('Supabase reports stop instead of silently creating a roster without a requ
   );
 });
 
+test('Supabase reports can temporarily include a migrated Drive photo', async () => {
+  enableSupabase();
+  let uploadedReport = null;
+  const tinyPng = Buffer.from(
+    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=',
+    'base64'
+  );
+  globalThis.fetch = async (url, options = {}) => {
+    const text = String(url);
+    if (text.includes('/contractors?')) {
+      return new Response(JSON.stringify([
+        { id: 'main-1', name: '主承包商', company_type: 'primary', status: 'active', created_at: '2026-08-01T00:00:00.000Z' },
+      ]), { status: 200 });
+    }
+    if (text.includes('/workers?')) {
+      return new Response(JSON.stringify([
+        {
+          id: 'worker-legacy',
+          name: '王小明',
+          id_number: 'A123456789',
+          phone: '0912345678',
+          emergency_contact: '王大明',
+          emergency_phone: '0900000000',
+          blood_type: 'O',
+          job_title: '水電',
+          contractor_id: 'main-1',
+          contractor_name: '主承包商',
+          entry_date: '2026-08-01',
+          notes: '',
+          created_at: '2026-08-28T01:00:00.000Z',
+          updated_at: '2026-08-28T01:00:00.000Z',
+          photo_storage_path: null,
+          photo_file_id: 'drive-file-1',
+        },
+      ]), { status: 200 });
+    }
+    if (text.endsWith('/storage/v1/bucket')) {
+      return new Response('{}', { status: 200 });
+    }
+    if (text.includes('/storage/v1/object/registry-reports/')) {
+      uploadedReport = Buffer.from(options.body);
+      return new Response('{}', { status: 200 });
+    }
+    if (text.includes('/storage/v1/object/sign/registry-reports/')) {
+      return new Response(JSON.stringify({
+        signedURL: '/storage/v1/object/sign/registry-reports/reports/report.pdf?token=test',
+      }), { status: 200 });
+    }
+    throw new Error(`Unexpected request: ${text}`);
+  };
+
+  const result = await generateReportFromSupabase(
+    { type: 'daily', date: '2026-08-28' },
+    { id: 'owner-1', role: 'owner', email: 'owner@example.com' },
+    {
+      legacyPhotoLoader: async (worker) => {
+        assert.equal(worker.photoFileId, 'drive-file-1');
+        return { bytes: tinyPng, contentType: 'image/png' };
+      },
+    },
+  );
+
+  assert.equal(result.source, 'supabase');
+  assert.ok(uploadedReport?.subarray(0, 4).equals(Buffer.from('%PDF')));
+});
+
 test('Supabase migration batches worker writes for larger legacy bundles', async () => {
   enableSupabase();
   const requests = [];

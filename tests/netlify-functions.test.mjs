@@ -278,6 +278,117 @@ test('admin gateway adds a contractor through Supabase without calling Apps Scri
   assert.deepEqual(upstreamRequests.map((item) => item.action), ['adminLogin']);
 });
 
+test('admin gateway generates Supabase PDF and bridges only legacy photos to Apps Script', { concurrency: false }, async () => {
+  setAdminConfig();
+  process.env.SUPABASE_URL = 'https://example.supabase.co';
+  process.env.SUPABASE_SERVICE_ROLE_KEY = 'server-key-for-test-only';
+  process.env.SUPABASE_DATA_MODE = 'supabase';
+
+  const tinyPng = Buffer.from(
+    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=',
+    'base64'
+  );
+  const upstreamActions = [];
+  const managerRow = {
+    id: 'manager-1',
+    username: 'owner@example.com',
+    display_name: '主要管理者',
+    email: 'owner@example.com',
+    role: 'owner',
+    contractor_id: null,
+    contractor_name: '',
+    status: 'active',
+    must_change_password: false,
+    session_version: 'session-version-1',
+  };
+  let uploadedReport = null;
+
+  globalThis.fetch = async (url, options = {}) => {
+    const text = String(url);
+    const contentType = options.headers?.['Content-Type'] || options.headers?.['content-type'] || '';
+    const body = options.body && String(contentType).includes('application/json')
+      ? JSON.parse(options.body)
+      : null;
+    if (text === APPS_SCRIPT_URL) {
+      upstreamActions.push(body.action);
+      if (body.action === 'adminLogin') {
+        return new Response(JSON.stringify({
+          ok: true,
+          data: {
+            profile: { id: 'manager-1', role: 'owner', email: 'owner@example.com' },
+            sessionVersion: 'session-version-1',
+          },
+        }), { status: 200 });
+      }
+      if (body.action === 'adminGetPhoto') {
+        return new Response(JSON.stringify({
+          ok: true,
+          data: { dataUrl: `data:image/png;base64,${tinyPng.toString('base64')}` },
+        }), { status: 200 });
+      }
+      throw new Error(`Unexpected GAS action: ${body.action}`);
+    }
+    if (text.includes('/rest/v1/managers')) {
+      return new Response(JSON.stringify([managerRow]), { status: 200 });
+    }
+    if (text.includes('/rest/v1/contractors?')) {
+      return new Response(JSON.stringify([
+        { id: 'main-1', name: '主承包商', company_type: 'primary', status: 'active' },
+      ]), { status: 200 });
+    }
+    if (text.includes('/rest/v1/workers?')) {
+      return new Response(JSON.stringify([
+        {
+          id: 'worker-legacy',
+          name: '王小明',
+          id_number: 'A123456789',
+          phone: '0912345678',
+          emergency_contact: '王大明',
+          emergency_phone: '0900000000',
+          blood_type: 'O',
+          job_title: '水電',
+          contractor_id: 'main-1',
+          contractor_name: '主承包商',
+          entry_date: '2026-08-01',
+          notes: '',
+          created_at: '2026-08-28T01:00:00.000Z',
+          updated_at: '2026-08-28T01:00:00.000Z',
+          photo_storage_path: null,
+          photo_file_id: 'drive-file-1',
+        },
+      ]), { status: 200 });
+    }
+    if (text.endsWith('/storage/v1/bucket')) {
+      return new Response('{}', { status: 200 });
+    }
+    if (text.includes('/storage/v1/object/registry-reports/')) {
+      uploadedReport = Buffer.from(options.body);
+      return new Response('{}', { status: 200 });
+    }
+    if (text.includes('/storage/v1/object/sign/registry-reports/')) {
+      return new Response(JSON.stringify({
+        signedURL: '/storage/v1/object/sign/registry-reports/reports/report.pdf?token=test',
+      }), { status: 200 });
+    }
+    if (text.includes('/rest/v1/audit_logs')) {
+      return new Response('[]', { status: 201 });
+    }
+    throw new Error(`Unexpected request: ${text}`);
+  };
+
+  const loggedIn = await login();
+  const response = await adminApi(request('/api/admin', {
+    action: 'adminGenerateReport',
+    payload: { type: 'daily', date: '2026-08-28' },
+  }, { Cookie: loggedIn.cookie }));
+  const responseBody = await response.json();
+
+  assert.equal(response.status, 200);
+  assert.equal(responseBody.data.source, 'supabase');
+  assert.ok(uploadedReport?.subarray(0, 4).equals(Buffer.from('%PDF')));
+  assert.deepEqual(upstreamActions, ['adminLogin', 'adminGetPhoto']);
+});
+
 test('password change rotates the session cookie and hides session version', { concurrency: false }, async () => {
   setAdminConfig();
   globalThis.fetch = async (_url, options) => {

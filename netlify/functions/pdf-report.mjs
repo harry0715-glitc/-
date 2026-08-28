@@ -58,9 +58,16 @@ async function ensureReportBucket() {
   return reportBucketPromise;
 }
 
-export async function createSupabaseRosterPdf({ report, workers }) {
-  const fonts = await loadFonts();
-  const photos = await loadWorkerPhotos(workers);
+export async function createSupabaseRosterPdf({ report, workers, legacyPhotoLoader = null }) {
+  let fonts;
+  try {
+    fonts = await loadFonts();
+  } catch (error) {
+    console.error(`PDF 字型載入失敗：${error?.message || error}`);
+    throw new ReportGenerationError('PDF 字型載入失敗，請重新部署網站');
+  }
+
+  const photos = await loadWorkerPhotos(workers, legacyPhotoLoader);
   const pdfBytes = await renderRosterPdf(report, workers, photos, fonts);
   if (pdfBytes.length > MAX_REPORT_BYTES) {
     throw new ReportGenerationError('PDF 檔案過大，請分公司或分日期產生');
@@ -88,28 +95,62 @@ export async function createSupabaseRosterPdf({ report, workers }) {
   };
 }
 
-async function loadWorkerPhotos(workers) {
+async function loadWorkerPhotos(workers, legacyPhotoLoader) {
   return mapWithConcurrency(workers, PHOTO_CONCURRENCY, async (worker) => {
-    if (!worker.photoStoragePath) {
+    let photo;
+    if (worker.photoStoragePath) {
+      try {
+        photo = await supabaseDownloadPhoto(worker.photoStoragePath);
+      } catch (error) {
+        throw new ReportGenerationError(`「${worker.name}」的 Supabase 照片讀取失敗，請重新上傳照片`);
+      }
+    } else if (worker.photoFileId && typeof legacyPhotoLoader === 'function') {
+      try {
+        photo = await legacyPhotoLoader(worker);
+      } catch (error) {
+        if (error instanceof ReportGenerationError) throw error;
+        throw new ReportGenerationError(`「${worker.name}」的舊照片讀取失敗，請重新上傳照片`);
+      }
+    } else {
       throw new ReportGenerationError(
         `「${worker.name}」沒有 Supabase 照片，請在後台重新上傳照片`
       );
     }
 
-    try {
-      const photo = await supabaseDownloadPhoto(worker.photoStoragePath);
-      if (photo.bytes.length > MAX_PHOTO_BYTES) {
-        throw new ReportGenerationError(`「${worker.name}」的照片檔案過大，請重新裁切後上傳`);
-      }
-      if (!/^image\/(jpeg|jpg|png)$/i.test(photo.contentType)) {
-        throw new ReportGenerationError(`「${worker.name}」的照片格式不支援`);
-      }
-      return photo.bytes;
-    } catch (error) {
-      if (error instanceof ReportGenerationError) throw error;
-      throw new ReportGenerationError(`「${worker.name}」的照片讀取失敗，請重新上傳照片`);
+    if (!photo || !Buffer.isBuffer(photo.bytes)) {
+      throw new ReportGenerationError(`「${worker.name}」的照片資料不完整，請重新上傳照片`);
     }
+    if (photo.bytes.length > MAX_PHOTO_BYTES) {
+      throw new ReportGenerationError(`「${worker.name}」的照片檔案過大，請重新裁切後上傳`);
+    }
+    if (!/^image\/(jpeg|jpg|png)$/i.test(photo.contentType || '')) {
+      throw new ReportGenerationError(`「${worker.name}」的照片格式不支援`);
+    }
+    return photo.bytes;
   });
+}
+
+export function photoFromDataUrl(value) {
+  const source = String(value || '');
+  const match = source.match(/^data:image\/(jpeg|jpg|png);base64,([A-Za-z0-9+/=]+)$/i);
+  if (!match) throw new ReportGenerationError('舊照片格式不支援，請重新上傳照片');
+
+  const isPng = match[1].toLowerCase() === 'png';
+  const bytes = Buffer.from(match[2], 'base64');
+  const validPng = isPng && bytes.length >= 8
+    && bytes.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]));
+  const validJpeg = !isPng && bytes.length >= 3
+    && bytes[0] === 255 && bytes[1] === 216 && bytes[2] === 255;
+  if (!validPng && !validJpeg) {
+    throw new ReportGenerationError('舊照片內容無效，請重新上傳照片');
+  }
+  if (bytes.length > MAX_PHOTO_BYTES) {
+    throw new ReportGenerationError('舊照片檔案過大，請重新裁切後上傳');
+  }
+  return {
+    bytes,
+    contentType: isPng ? 'image/png' : 'image/jpeg',
+  };
 }
 
 async function mapWithConcurrency(items, limit, callback) {
