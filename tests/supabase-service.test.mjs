@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { afterEach, test } from 'node:test';
 
 import {
+  addContractorInSupabase,
   createSupabaseBackup,
   getAdminDataFromSupabase,
   getPublicConfigFromSupabase,
@@ -107,6 +108,37 @@ test('Supabase admin data preserves contractor scoping and existing field names'
   assert.deepEqual(result.contractors.map((item) => item.id), ['sub-1']);
   assert.equal(result.workers[0].idNumber, 'A123456789');
   assert.equal(result.workers[0].hasPhoto, true);
+});
+
+test('Supabase adds a contractor directly without calling Apps Script', async () => {
+  enableSupabase();
+  const requests = [];
+  globalThis.fetch = async (url, options = {}) => {
+    const text = String(url);
+    requests.push({ url: text, method: options.method || 'GET' });
+    if (text.includes('/rest/v1/contractors?')) {
+      return new Response(JSON.stringify([
+        { id: 'main-1', name: '主承包商', company_type: 'primary', status: 'active' },
+      ]), { status: 200 });
+    }
+    if (text.endsWith('/rest/v1/contractors')) {
+      return new Response('[]', { status: 201 });
+    }
+    if (text.endsWith('/rest/v1/audit_logs')) {
+      return new Response('[]', { status: 201 });
+    }
+    throw new Error(`Unexpected request: ${text}`);
+  };
+
+  const result = await addContractorInSupabase(
+    { name: '乙次承包商' },
+    { id: 'owner-1', role: 'owner' },
+  );
+
+  assert.equal(result.name, '乙次承包商');
+  assert.equal(result.companyType, 'subcontractor');
+  assert.ok(requests.some((request) => request.url.endsWith('/rest/v1/contractors')));
+  assert.equal(requests.some((request) => request.url.includes('script.google.com')), false);
 });
 
 test('Supabase reports generate a PDF directly and embed a private photo', async () => {

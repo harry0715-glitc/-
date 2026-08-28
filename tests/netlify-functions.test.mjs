@@ -214,6 +214,70 @@ test('admin gateway repairs a legacy session into Supabase', { concurrency: fals
   assert.equal(managerSynced, true);
 });
 
+test('admin gateway adds a contractor through Supabase without calling Apps Script', { concurrency: false }, async () => {
+  setAdminConfig();
+  process.env.SUPABASE_URL = 'https://example.supabase.co';
+  process.env.SUPABASE_SERVICE_ROLE_KEY = 'server-key-for-test-only';
+  process.env.SUPABASE_DATA_MODE = 'supabase';
+
+  const upstreamRequests = [];
+  const managerRow = {
+    id: 'manager-1',
+    username: 'owner@example.com',
+    display_name: '主要管理者',
+    email: 'owner@example.com',
+    role: 'owner',
+    contractor_id: null,
+    contractor_name: '',
+    status: 'active',
+    must_change_password: false,
+    session_version: 'session-version-1'
+  };
+  globalThis.fetch = async (url, options = {}) => {
+    const text = String(url);
+    const body = options.body ? JSON.parse(options.body) : null;
+    if (text === APPS_SCRIPT_URL) {
+      upstreamRequests.push(body);
+      if (body.action === 'adminLogin') {
+        return new Response(JSON.stringify({
+          ok: true,
+          data: {
+            profile: { id: 'manager-1', role: 'owner', email: 'owner@example.com' },
+            sessionVersion: 'session-version-1'
+          }
+        }), { status: 200 });
+      }
+      throw new Error(`Unexpected GAS action: ${body.action}`);
+    }
+    if (text.includes('/rest/v1/managers')) {
+      return new Response(JSON.stringify([managerRow]), { status: 200 });
+    }
+    if (text.includes('/rest/v1/contractors?')) {
+      return new Response(JSON.stringify([
+        { id: 'main-1', name: '主承包商', company_type: 'primary', status: 'active' },
+      ]), { status: 200 });
+    }
+    if (text.endsWith('/rest/v1/contractors')) {
+      return new Response('[]', { status: 201 });
+    }
+    if (text.endsWith('/rest/v1/audit_logs')) {
+      return new Response('[]', { status: 201 });
+    }
+    throw new Error(`Unexpected request: ${text}`);
+  };
+
+  const loggedIn = await login();
+  const response = await adminApi(request('/api/admin', {
+    action: 'adminAddContractor',
+    payload: { name: '乙次承包商' }
+  }, { Cookie: loggedIn.cookie }));
+  const responseBody = await response.json();
+
+  assert.equal(response.status, 200);
+  assert.equal(responseBody.data.name, '乙次承包商');
+  assert.deepEqual(upstreamRequests.map((item) => item.action), ['adminLogin']);
+});
+
 test('password change rotates the session cookie and hides session version', { concurrency: false }, async () => {
   setAdminConfig();
   globalThis.fetch = async (_url, options) => {

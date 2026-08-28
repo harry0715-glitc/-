@@ -614,9 +614,30 @@ function createManagerAdmin_(input, actor) {
   return withScriptLock_(() => {
     const db = getDb_();
     const contractorId = requireText_(input.contractorId, '承包商', 100);
-    const contractor = readObjects_(db.getSheetByName('包商'))
+    const contractorSheet = db.getSheetByName('包商');
+    const contractors = readObjects_(contractorSheet);
+    let contractor = contractors
       .find(item => item.id === contractorId && (item.status || 'active') === 'active');
-    if (!contractor) throw new Error('找不到有效的承包商');
+    if (!contractor) {
+      if (contractors.some(item => item.id === contractorId)) {
+        throw new Error('承包商已停用或不存在');
+      }
+      const contractorName = requireText_(input.contractorName, '承包商名稱', 100);
+      const existingByName = contractors.find(item =>
+        item.name === contractorName && (item.status || 'active') === 'active'
+      );
+      if (existingByName) throw new Error('承包商資料不一致，請重新整理後再試');
+      contractor = {
+        id: contractorId,
+        name: contractorName,
+        companyType: CONTRACTOR_TYPE_SUBCONTRACTOR,
+        createdAt: new Date().toISOString(),
+        status: 'active',
+        archivedAt: ''
+      };
+      appendObject_(contractorSheet, CONTRACTOR_HEADERS, contractor);
+      clearPublicConfigCache_();
+    }
     if (contractorType_(contractor) === CONTRACTOR_TYPE_PRIMARY) {
       throw new Error('主承包商僅由主要管理者管理，不可建立次管理者');
     }

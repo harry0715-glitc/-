@@ -193,6 +193,40 @@ export async function createSupabaseBackup(actor) {
   };
 }
 
+export async function addContractorInSupabase(input, actor) {
+  if (actor?.role !== 'owner') throw new UserInputError('僅主要管理者可新增承包商');
+
+  const name = requireText(input.name, '次承包商名稱', 100);
+  const existingRows = await supabaseSelect('contractors', {
+    select: 'id,name,company_type,status',
+    status: 'eq.active',
+  });
+  const normalizedName = normalizeText(name).toLowerCase();
+  if (existingRows.some((row) => normalizeText(row.name).toLowerCase() === normalizedName)) {
+    throw new UserInputError('承包商已存在');
+  }
+
+  const contractor = {
+    id: randomUUID(),
+    name,
+    company_type: 'subcontractor',
+    status: 'active',
+    created_at: new Date().toISOString(),
+    archived_at: null,
+  };
+  try {
+    await supabaseInsert('contractors', contractor, {
+      returnRepresentation: false,
+    });
+  } catch (error) {
+    throw normalizeSupabaseWriteError(error);
+  }
+
+  // Audit logging is best effort so a slow log request cannot delay the user action.
+  void writeAudit(actor, 'create', 'contractor', contractor.id, name);
+  return contractorSummaryFromRow(contractor);
+}
+
 export async function createWorkerInSupabase(input, actor, source) {
   const contractorId = actor?.role === 'contractor'
     ? actor.contractorId

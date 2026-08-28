@@ -1738,7 +1738,11 @@ function ManagersTab({ data, showToast, adminCall, refresh }) {
           event.preventDefault();
           setCreating(true);
           try {
-            await adminCall('adminCreateManager', form);
+            const contractor = subcontractors.find((item) => item.id === form.contractorId);
+            await adminCall('adminCreateManager', {
+              ...form,
+              contractorName: contractor?.name || ''
+            });
             setIssued({ email: form.email, password: form.temporaryPassword });
             setForm({
               displayName: '',

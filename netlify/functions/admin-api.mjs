@@ -2,6 +2,7 @@ import { createHmac, timingSafeEqual } from "node:crypto";
 
 import { SupabaseError, isSupabaseConfigured, isSupabaseEnabled } from "./supabase-client.mjs";
 import {
+  addContractorInSupabase,
   createWorkerInSupabase,
   createSupabaseBackup,
   deleteWorkerInSupabase,
@@ -29,6 +30,7 @@ const HTTP_PROTOCOLS = new Set(["http:", "https:"]);
 const BASE64URL_PATTERN = /^[A-Za-z0-9_-]+$/;
 const SUPABASE_FAST_ACTIONS = new Set([
   "adminGetData",
+  "adminAddContractor",
   "adminAddWorker",
   "adminUpdateWorker",
   "adminDeleteWorker",
@@ -237,6 +239,8 @@ async function handler(event) {
       let result;
       if (request.action === "adminGetData") {
         result = await getAdminDataFromSupabase(supabaseActor);
+      } else if (request.action === "adminAddContractor") {
+        result = await addContractorInSupabase(payload, supabaseActor);
       } else if (request.action === "adminAddWorker") {
         result = await createWorkerInSupabase(payload, supabaseActor, "manager");
       } else if (request.action === "adminUpdateWorker") {

@@ -12,7 +12,7 @@
 
 停用或隨承包商封存次管理者時，系統會撤銷該帳號對既有私有 PDF 連結的使用權。對方先前已下載到自己裝置的副本無法遠端收回，因此帳號與臨時密碼應分開傳送，離職或更換管理者時要立即停用帳號。
 
-當 `SUPABASE_DATA_MODE=supabase` 時，人員、公司、報表與備份的主要操作都直接使用 Supabase，不會再把報表資料送回 Apps Script。Apps Script 暫時只保留登入、帳號相容與舊資料控制功能；待帳號也搬到 Supabase 後，才可完全移除 Apps Script。
+當 `SUPABASE_DATA_MODE=supabase` 時，人員、次承包商新增、報表與備份的主要操作都直接使用 Supabase，不會再把這些高頻資料操作送回 Apps Script。主承包商更名、承包商封存及登入、密碼、次管理者帳號仍保留在 Apps Script，因為這些是低頻的控制與帳號操作；待帳號也搬到 Supabase 後，才可完全移除 Apps Script。
 
 ## 一、準備三組密鑰
 
@@ -31,6 +31,7 @@
 1. 開啟 [Google Apps Script](https://script.google.com/) 的原專案。
 2. 先備份原本的 `Code.gs`，再將專案內容全部替換為本專案的 `Code.gs`。
 3. 在「專案設定」將時區設為 `Asia/Taipei`。
+   本版本的 `createManagerAdmin_` 會在需要時，把 Supabase 新增但尚未出現在 Google 試算表的次承包商補入「包商」工作表，讓原本的次管理者帳號流程可以繼續使用。若要替新公司建立次管理者，必須先部署本版本的 `Code.gs`。
 4. 在「專案設定 > 指令碼屬性」新增：
 
 | 屬性 | 值 |
