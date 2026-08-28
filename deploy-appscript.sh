@@ -111,7 +111,7 @@ DESCRIPTION="${DESCRIPTION:-workerslist deploy $(date '+%Y-%m-%d %H:%M:%S')}"
 
 cd "$PROJECT_DIR"
 
-for required in appsscript.json Code.js; do
+for required in appsscript.json Code.gs; do
   [[ -f "$required" ]] || { echo "缺少必要檔案: $required" >&2; exit 1; }
 done
 

@@ -90,6 +90,7 @@ test('public gateway adds its server-only secret without exposing it', { concurr
   const text = await response.text();
 
   assert.equal(response.status, 200);
+  assert.match(response.headers.get('cache-control'), /public, max-age=60/);
   assert.equal(upstreamRequest.publicSecret, GAS_PUBLIC_SECRET);
   assert.equal(upstreamRequest.action, 'getPublicConfig');
   assert.equal(text.includes(GAS_PUBLIC_SECRET), false);

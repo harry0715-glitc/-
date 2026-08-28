@@ -8,6 +8,8 @@ const BACKUP_FOLDER_NAME = '🔒 每日備份';
 const SCHEMA_VERSION = '6';
 const CONTRACTOR_TYPE_PRIMARY = 'primary';
 const CONTRACTOR_TYPE_SUBCONTRACTOR = 'subcontractor';
+const PUBLIC_CONFIG_CACHE_KEY = 'workers_registry_public_config_v1';
+const PUBLIC_CONFIG_CACHE_SECONDS = 300;
 const TAIWAN_ID_AREA_CODES = {
   A: 10, B: 11, C: 12, D: 13, E: 14, F: 15, G: 16, H: 17,
   I: 34, J: 18, K: 19, L: 20, M: 21, N: 22, O: 35, P: 23,
@@ -206,6 +208,15 @@ function setupSystemFromProperties() {
   return result;
 }
 
+// 手動執行一次，讓目前 Apps Script 部署取得產生 PDF 所需的文件授權。
+function authorizeSystemServices() {
+  const name = '施工人員名冊_授權檢查_' + Date.now();
+  const document = DocumentApp.create(name);
+  document.saveAndClose();
+  DriveApp.getFileById(document.getId()).setTrashed(true);
+  return { ok: true };
+}
+
 // 既有系統升級時可單獨執行，不會重設主要管理者密碼。
 function configurePrimaryContractorFromProperties() {
   const props = PropertiesService.getScriptProperties();
@@ -385,10 +396,12 @@ function sortContractors_(contractors) {
   );
 }
 
-function getPrimaryContractor_(db) {
+function getPrimaryContractor_(db, knownContractors) {
   const props = PropertiesService.getScriptProperties();
-  const contractors = readObjects_(db.getSheetByName('包商'))
-    .filter(item => (item.status || 'active') === 'active');
+  const contractors = Array.isArray(knownContractors)
+    ? knownContractors.filter(item => (item.status || 'active') === 'active')
+    : readObjects_(db.getSheetByName('包商'))
+      .filter(item => (item.status || 'active') === 'active');
   const savedId = props.getProperty('PRIMARY_CONTRACTOR_ID') || '';
   const primary = contractors.find(item =>
     item.id === savedId && contractorType_(item) === CONTRACTOR_TYPE_PRIMARY
@@ -404,8 +417,8 @@ function getPrimaryContractor_(db) {
   return primary;
 }
 
-function requirePrimaryContractor_(db) {
-  const primary = getPrimaryContractor_(db);
+function requirePrimaryContractor_(db, knownContractors) {
+  const primary = getPrimaryContractor_(db, knownContractors);
   if (!primary) throw new Error('請先由主要管理者設定主承包商公司名稱');
   return primary;
 }
@@ -485,6 +498,7 @@ function upsertPrimaryContractor_(db, name, actor) {
 
   props.setProperty('PRIMARY_CONTRACTOR_ID', primary.id);
   props.setProperty('PRIMARY_CONTRACTOR_NAME', primary.name);
+  clearPublicConfigCache_();
   updateContractorDenormalizedNames_(db, primary.id, primary.name);
   const disabledManagers = disableManagersForPrimaryContractor_(db, primary.id);
   getOrCreateSubfolder_(getRootFolder_(), safeName_(primary.name, 80));
@@ -786,6 +800,8 @@ function getDb_() {
 }
 
 function ensureSchema_(ss) {
+  const props = PropertiesService.getScriptProperties();
+  if (props.getProperty('SCHEMA_VERSION') === SCHEMA_VERSION) return;
   const contractors = getOrCreateSheet_(ss, '包商');
   const workers = getOrCreateSheet_(ss, '人員');
   const managers = getOrCreateSheet_(ss, '管理者');
@@ -798,7 +814,7 @@ function ensureSchema_(ss) {
   applyHeaderStyle_(workers, workers.getLastColumn());
   applyHeaderStyle_(managers, managers.getLastColumn());
   applyHeaderStyle_(audit, audit.getLastColumn());
-  PropertiesService.getScriptProperties().setProperty('SCHEMA_VERSION', SCHEMA_VERSION);
+  props.setProperty('SCHEMA_VERSION', SCHEMA_VERSION);
 }
 
 function getOrCreateSheet_(ss, name) {
@@ -884,17 +900,49 @@ function updateRowById_(sheet, id, changes) {
   });
 }
 
+function getPublicConfigCache_() {
+  try {
+    const cached = CacheService.getScriptCache().get(PUBLIC_CONFIG_CACHE_KEY);
+    return cached ? JSON.parse(cached) : null;
+  } catch (err) {
+    console.warn('讀取公開設定快取失敗：' + err.message);
+    return null;
+  }
+}
+
+function clearPublicConfigCache_() {
+  try {
+    CacheService.getScriptCache().remove(PUBLIC_CONFIG_CACHE_KEY);
+  } catch (err) {
+    console.warn('清除公開設定快取失敗：' + err.message);
+  }
+}
+
 function getPublicConfig_() {
+  const cached = getPublicConfigCache_();
+  if (cached) return cached;
+
   const db = getDb_();
+  const activeContractors = readObjects_(db.getSheetByName('包商'))
+    .filter(item => (item.status || 'active') === 'active');
   const contractors = sortContractors_(
-    readObjects_(db.getSheetByName('包商'))
-      .filter(item => (item.status || 'active') === 'active')
+    activeContractors
   ).map(contractorSummary_);
-  const primary = getPrimaryContractor_(db);
-  return {
+  const primary = getPrimaryContractor_(db, activeContractors);
+  const result = {
     primaryContractor: primary ? contractorSummary_(primary) : null,
     contractors: contractors
   };
+  try {
+    CacheService.getScriptCache().put(
+      PUBLIC_CONFIG_CACHE_KEY,
+      JSON.stringify(result),
+      PUBLIC_CONFIG_CACHE_SECONDS
+    );
+  } catch (err) {
+    console.warn('寫入公開設定快取失敗：' + err.message);
+  }
+  return result;
 }
 
 function getAdminData_(actor) {
@@ -915,7 +963,7 @@ function getAdminData_(actor) {
     ? allWorkers
     : allWorkers.filter(item => item.contractorId === actor.contractorId)
   ).map(item => sanitizeWorker_(item, contractorMap));
-  const primary = getPrimaryContractor_(db);
+  const primary = getPrimaryContractor_(db, allContractors);
 
   return {
     profile: managerProfile_(actor),
@@ -1015,7 +1063,7 @@ function createWorker_(input, actor, source) {
       worker.photoFileId = photoFile.getId();
       worker.photoUrl = '';
       appendObject_(sheet, WORKER_HEADERS, worker);
-      writeAudit_(actor, 'create', 'worker', worker.id, contractor.name);
+      writeAudit_(actor, 'create', 'worker', worker.id, contractor.name, db);
       return { receiptId: worker.id, createdAt: now };
     } catch (err) {
       if (photoFile) {
@@ -1084,7 +1132,7 @@ function updateWorkerAdmin_(input, actor) {
       if (newPhoto && existing.photoFileId) {
         try { DriveApp.getFileById(existing.photoFileId).setTrashed(true); } catch (err) { console.warn(err.message); }
       }
-      writeAudit_(actor, 'update', 'worker', id, contractor.name);
+      writeAudit_(actor, 'update', 'worker', id, contractor.name, db);
       return { id: id, updatedAt: now };
     } catch (err) {
       if (newPhoto) {
@@ -1097,7 +1145,8 @@ function updateWorkerAdmin_(input, actor) {
 
 function softDeleteWorkerAdmin_(input, actor) {
   return withScriptLock_(() => {
-    const sheet = getDb_().getSheetByName('人員');
+    const db = getDb_();
+    const sheet = db.getSheetByName('人員');
     const id = requireText_(input.id, '人員 ID', 100);
     const worker = readObjects_(sheet)
       .find(item => item.id === id && (item.status || 'active') === 'active');
@@ -1109,7 +1158,7 @@ function softDeleteWorkerAdmin_(input, actor) {
       deletedAt: now,
       updatedAt: now
     });
-    writeAudit_(actor, 'archive', 'worker', id, worker.contractorName);
+    writeAudit_(actor, 'archive', 'worker', id, worker.contractorName, db);
     return { id: id };
   });
 }
@@ -1253,6 +1302,7 @@ function addContractorAdmin_(input, actor) {
     };
     appendObject_(db.getSheetByName('包商'), CONTRACTOR_HEADERS, contractor);
     getOrCreateSubfolder_(getRootFolder_(), safeName_(name, 80));
+    clearPublicConfigCache_();
     writeAudit_(actor, 'create', 'contractor', contractor.id, name);
     return contractor;
   });
@@ -1274,6 +1324,7 @@ function archiveContractorAdmin_(input, actor) {
 
     const now = new Date().toISOString();
     updateRowById_(db.getSheetByName('包商'), id, { status: 'archived', archivedAt: now });
+    clearPublicConfigCache_();
     readObjects_(db.getSheetByName('管理者'))
       .filter(item => item.contractorId === id && item.status === 'active')
       .forEach(item => {
@@ -1289,8 +1340,9 @@ function archiveContractorAdmin_(input, actor) {
   });
 }
 
-function writeAudit_(actor, action, targetType, targetId, details) {
-  appendObject_(getDb_().getSheetByName('操作紀錄'), AUDIT_HEADERS, {
+function writeAudit_(actor, action, targetType, targetId, details, db) {
+  const database = db || getDb_();
+  appendObject_(database.getSheetByName('操作紀錄'), AUDIT_HEADERS, {
     timestamp: new Date().toISOString(),
     actorId: actor ? actor.id : 'public',
     actorRole: actor ? actor.role : 'public',
@@ -1328,9 +1380,9 @@ function generateReportAdmin_(input, actor) {
   const type = String(input.type || '');
   if (type !== 'daily' && type !== 'company') throw new Error('報表類型不正確');
   const db = getDb_();
-  const primary = requirePrimaryContractor_(db);
   const contractors = readObjects_(db.getSheetByName('包商'))
     .filter(item => (item.status || 'active') === 'active');
+  const primary = requirePrimaryContractor_(db, contractors);
   const contractorMap = {};
   contractors.forEach(item => { contractorMap[item.id] = item; });
   let workers = readObjects_(db.getSheetByName('人員'))

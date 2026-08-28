@@ -71,7 +71,13 @@ export default async function publicApi(request) {
     }
     return jsonResponse(400, { ok: false, error: safePublicError(message) });
   }
-  return jsonResponse(200, upstream);
+  const responseHeaders = body.action === "getPublicConfig"
+    ? {
+      "Cache-Control": "public, max-age=60, stale-while-revalidate=300",
+      Vary: "Origin"
+    }
+    : {};
+  return jsonResponse(200, upstream, responseHeaders);
 }
 
 function safePublicError(message) {

@@ -46,7 +46,7 @@ export default [
     },
   },
   {
-    files: ['Code.js'],
+    files: ['Code.gs'],
     languageOptions: {
       globals: appsScriptGlobals,
     },
