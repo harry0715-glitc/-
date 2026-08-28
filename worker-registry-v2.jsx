@@ -97,7 +97,7 @@ const API = {
       credentials: 'include',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ action, payload })
-    }, action === 'adminGenerateReport' ? 90000 : 30000);
+    }, action === 'adminGenerateReport' || action === 'adminSyncSupabase' ? 90000 : 30000);
     return readJson(response);
   }
 };

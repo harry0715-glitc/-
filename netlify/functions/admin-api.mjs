@@ -19,6 +19,7 @@ const COOKIE_NAME = "__Host-wr_session";
 const SESSION_MAX_AGE_SECONDS = 8 * 60 * 60;
 const ACTOR_TOKEN_TTL_SECONDS = 5 * 60;
 const UPSTREAM_TIMEOUT_MS = 15_000;
+const MIGRATION_TIMEOUT_MS = 55_000;
 const REPORT_TIMEOUT_MS = 55_000;
 const GENERIC_ERROR = "Request failed";
 const HTTP_PROTOCOLS = new Set(["http:", "https:"]);
@@ -181,15 +182,25 @@ async function handler(event) {
   }
 
   if (request.action === "adminSyncSupabase") {
-    if (!isSupabaseConfigured()) return errorResponse(500);
+    if (!isSupabaseConfigured()) {
+      return jsonResponse(500, {
+        ok: false,
+        error: "Supabase 尚未完成設定，請確認 Netlify 的 SUPABASE_URL 與 SUPABASE_SERVICE_ROLE_KEY"
+      });
+    }
     const migrationBody = await postJson(config.appsScriptUrl, {
       action: "adminExportSupabaseData",
       payload: {},
       adminSecret: config.gasAdminSecret,
       actorToken
-    }, UPSTREAM_TIMEOUT_MS);
+    }, MIGRATION_TIMEOUT_MS);
     if (!migrationBody || migrationBody.ok !== true) {
-      return errorResponse(migrationBody ? 400 : 502);
+      return jsonResponse(migrationBody ? 400 : 502, {
+        ok: false,
+        error: migrationBody
+          ? "Google 資料匯出失敗，請確認 Apps Script 已部署最新版本"
+          : "Google 資料服務逾時，請稍後再試"
+      });
     }
     try {
       const synced = await syncBundleToSupabase(migrationBody.data);
@@ -423,7 +434,7 @@ async function syncGasSnapshot(config, actorToken) {
     payload: {},
     adminSecret: config.gasAdminSecret,
     actorToken
-  }, UPSTREAM_TIMEOUT_MS);
+  }, MIGRATION_TIMEOUT_MS);
   if (!migrationBody || migrationBody.ok !== true) {
     throw new Error("Google 資料同步來源無法取得");
   }
@@ -434,8 +445,31 @@ function supabaseErrorResponse(error) {
   if (error instanceof UserInputError) {
     return jsonResponse(400, { ok: false, error: error.message });
   }
-  if (error instanceof SupabaseError && error.status === 401) {
-    return errorResponse(401);
+  if (error instanceof SupabaseError) {
+    if (error.code === "NOT_CONFIGURED") {
+      return jsonResponse(500, {
+        ok: false,
+        error: "Supabase 尚未完成設定，請確認 Netlify 的 SUPABASE_URL 與 SUPABASE_SERVICE_ROLE_KEY"
+      });
+    }
+    if (error.status === 401 || error.status === 403) {
+      return jsonResponse(502, {
+        ok: false,
+        error: "Supabase 伺服器密鑰無效或沒有權限"
+      });
+    }
+    if (error.status === 404) {
+      return jsonResponse(502, {
+        ok: false,
+        error: "Supabase 資料表尚未建立，請確認已執行資料庫設定"
+      });
+    }
+    if (error.status === 504) {
+      return jsonResponse(504, {
+        ok: false,
+        error: "Supabase 連線逾時，請稍後再試"
+      });
+    }
   }
   return errorResponse(502);
 }

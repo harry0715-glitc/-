@@ -331,21 +331,33 @@ export async function syncBundleToSupabase(bundle) {
     }
   }
 
-  for (const worker of workers) {
-    const row = workerRowFromBundle(worker);
-    if (!row) {
-      skippedWorkers.push(String(worker?.id || 'unknown'));
-      continue;
-    }
+  const workerRows = workers.map(workerRowFromBundle);
+  workers.forEach((worker, index) => {
+    if (!workerRows[index]) skippedWorkers.push(String(worker?.id || 'unknown'));
+  });
+  for (const batch of batches(workerRows.filter(Boolean), 100)) {
+    if (!batch.length) continue;
     try {
-      await supabaseUpsert('workers', row);
-      workerCount++;
+      await supabaseUpsert('workers', batch);
+      workerCount += batch.length;
     } catch (error) {
-      if (error instanceof SupabaseError && error.status === 409) {
-        skippedWorkers.push(String(worker.id || 'unknown'));
-        continue;
+      if (!(error instanceof SupabaseError && (error.status === 409 || error.code === '23505'))) {
+        throw error;
       }
-      throw error;
+      // Retry conflicting rows individually so one legacy duplicate does not block the rest.
+      for (const row of batch) {
+        try {
+          await supabaseUpsert('workers', row);
+          workerCount++;
+        } catch (rowError) {
+          if (rowError instanceof SupabaseError
+            && (rowError.status === 409 || rowError.code === '23505')) {
+            skippedWorkers.push(String(row.id || 'unknown'));
+            continue;
+          }
+          throw rowError;
+        }
+      }
     }
   }
 

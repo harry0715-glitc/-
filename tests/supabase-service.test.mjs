@@ -4,6 +4,7 @@ import { afterEach, test } from 'node:test';
 import {
   getAdminDataFromSupabase,
   getPublicConfigFromSupabase,
+  syncBundleToSupabase,
 } from '../netlify/functions/supabase-service.mjs';
 import {
   getSupabaseDataMode,
@@ -102,4 +103,39 @@ test('Supabase admin data preserves contractor scoping and existing field names'
   assert.deepEqual(result.contractors.map((item) => item.id), ['sub-1']);
   assert.equal(result.workers[0].idNumber, 'A123456789');
   assert.equal(result.workers[0].hasPhoto, true);
+});
+
+test('Supabase migration batches worker writes for larger legacy bundles', async () => {
+  enableSupabase();
+  const requests = [];
+  globalThis.fetch = async (url, options = {}) => {
+    requests.push({ url: String(url), body: options.body ? JSON.parse(options.body) : null });
+    return new Response('[]', { status: 200 });
+  };
+
+  const workers = Array.from({ length: 101 }, (_, index) => ({
+    id: `worker-${index}`,
+    name: `人員${index}`,
+    idNumber: `A${String(index).padStart(9, '0')}`,
+    phone: `0912345${String(index).padStart(3, '0')}`,
+    emergencyContact: '緊急聯絡人',
+    emergencyPhone: '0900000000',
+    bloodType: 'O',
+    jobTitle: '水電',
+    contractorId: 'main-1',
+    contractorName: '主承包商',
+    entryDate: '2026-08-01',
+    notes: '',
+    createdAt: '2026-08-01T00:00:00.000Z',
+  }));
+
+  const result = await syncBundleToSupabase({
+    contractors: [{ id: 'main-1', name: '主承包商', companyType: 'primary', status: 'active' }],
+    workers,
+    managers: [],
+  });
+  const workerRequests = requests.filter((request) => request.url.includes('/workers?'));
+  assert.deepEqual(workerRequests.map((request) => request.body.length), [100, 1]);
+  assert.equal(result.workers, 101);
+  assert.deepEqual(result.skippedWorkers, []);
 });
