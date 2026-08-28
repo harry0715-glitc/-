@@ -4,6 +4,7 @@ import { afterEach, test } from 'node:test';
 import {
   getAdminDataFromSupabase,
   getPublicConfigFromSupabase,
+  syncActionResultToSupabase,
   syncBundleToSupabase,
 } from '../netlify/functions/supabase-service.mjs';
 import {
@@ -139,4 +140,25 @@ test('Supabase migration batches worker writes for larger legacy bundles', async
   assert.deepEqual(workerRequests.map((request) => request.body.length), [100, 1]);
   assert.equal(result.workers, 101);
   assert.deepEqual(result.skippedWorkers, []);
+});
+
+test('Supabase mirrors a contractor action without exporting the Google sheets', async () => {
+  enableSupabase();
+  const requests = [];
+  globalThis.fetch = async (url, options = {}) => {
+    requests.push({ url: String(url), method: options.method || 'GET', body: options.body ? JSON.parse(options.body) : null });
+    return new Response('[]', { status: 200 });
+  };
+
+  const result = await syncActionResultToSupabase('adminAddContractor', {
+    id: 'sub-1',
+    name: '乙次承包商',
+    companyType: 'subcontractor',
+    status: 'active',
+  });
+
+  const contractorRequest = requests.find((request) => request.url.includes('/contractors') && request.method === 'POST');
+  assert.equal(result.contractors, 1);
+  assert.equal(contractorRequest.body[0].id, 'sub-1');
+  assert.equal(requests.length, 1);
 });

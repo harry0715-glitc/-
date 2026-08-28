@@ -76,23 +76,26 @@ export async function syncManagerFromLogin(profile, sessionVersion) {
 }
 
 export async function getAdminDataFromSupabase(actor) {
-  const contractorRows = await supabaseSelect('contractors', {
-    status: 'eq.active',
-    order: 'company_type.asc,name.asc',
-  });
-  const contractors = contractorRows.map(contractorSummaryFromRow).sort(compareContractors);
   const owner = actor.role === 'owner';
   const workerParams = { status: 'eq.active', order: 'created_at.desc' };
   if (!owner) workerParams.contractor_id = `eq.${actor.contractorId}`;
-  const workerRows = await supabaseSelect('workers', workerParams);
+  const [contractorRows, workerRows, managerRows] = await Promise.all([
+    supabaseSelect('contractors', {
+      status: 'eq.active',
+      order: 'company_type.asc,name.asc',
+    }),
+    supabaseSelect('workers', workerParams),
+    owner
+      ? supabaseSelect('managers', {
+        role: 'eq.contractor',
+        order: 'created_at.desc',
+      })
+      : Promise.resolve([]),
+  ]);
+  const contractors = contractorRows.map(contractorSummaryFromRow).sort(compareContractors);
   const contractorMap = Object.fromEntries(contractors.map((item) => [item.id, item]));
   const workers = workerRows.map((row) => workerSummaryFromRow(row, contractorMap));
-  const managers = owner
-    ? (await supabaseSelect('managers', {
-      role: 'eq.contractor',
-      order: 'created_at.desc',
-    })).map(managerSummaryFromRow)
-    : [];
+  const managers = managerRows.map(managerSummaryFromRow);
   const primaryContractor = contractors.find((item) => item.companyType === 'primary') || null;
 
   return {
@@ -117,17 +120,18 @@ export async function createWorkerInSupabase(input, actor, source) {
   const contractorId = actor?.role === 'contractor'
     ? actor.contractorId
     : requireText(input.contractorId, '所屬承包商', 100);
-  const contractor = await getActiveContractor(contractorId);
-  if (!contractor) throw new UserInputError('所選承包商不存在或已停用');
-
   const normalized = validateWorkerInput(input, true);
   const submissionId = String(input.submissionId || '').trim() || randomUUID();
-  const existingSubmission = await supabaseSelect('workers', {
-    submission_id: `eq.${submissionId}`,
-    limit: '1',
-  });
-  if (existingSubmission[0]) {
-    return { receiptId: existingSubmission[0].id, duplicate: true };
+  const [contractor, existingSubmissionRows] = await Promise.all([
+    getActiveContractor(contractorId),
+    supabaseSelect('workers', {
+      submission_id: `eq.${submissionId}`,
+      limit: '1',
+    }),
+  ]);
+  if (!contractor) throw new UserInputError('所選承包商不存在或已停用');
+  if (existingSubmissionRows[0]) {
+    return { receiptId: existingSubmissionRows[0].id, duplicate: true };
   }
 
   await assertNoDuplicateWorker(normalized, contractor.id);
@@ -176,12 +180,13 @@ export async function updateWorkerInSupabase(input, actor) {
   const contractor = await getActiveContractor(contractorId);
   if (!contractor) throw new UserInputError('所選承包商不存在或已停用');
   const normalized = validateWorkerInput(input, false);
-  await assertNoDuplicateWorker(normalized, contractor.id, id);
+  const duplicateCheck = assertNoDuplicateWorker(normalized, contractor.id, id);
 
   const now = new Date().toISOString();
   let newPhotoPath = '';
   let newPhotoUploaded = false;
   try {
+    await duplicateCheck;
     if (input.photo) {
       const photo = parsePhoto(input.photo);
       newPhotoPath = `${contractor.id}/${id}${photo.extension}`;
@@ -376,6 +381,55 @@ export async function syncBundleToSupabase(bundle) {
   };
 }
 
+// Keep the low-frequency Google control-plane actions responsive by mirroring
+// only the row changed by the completed action instead of exporting every sheet.
+export async function syncActionResultToSupabase(action, result) {
+  if (action === 'adminAddContractor' || action === 'adminUpdatePrimaryContractor') {
+    const contractor = contractorRowFromBundle(result);
+    if (!contractor) throw new UserInputError('承包商資料格式不正確');
+
+    if (action === 'adminUpdatePrimaryContractor') {
+      const previousPrimaryRows = await supabaseSelect('contractors', {
+        company_type: 'eq.primary',
+        status: 'eq.active',
+      });
+      const now = new Date().toISOString();
+      await Promise.all([
+        ...previousPrimaryRows
+          .filter((row) => String(row.id) !== contractor.id)
+          .map((row) => supabaseUpdate(
+            'contractors',
+            { id: `eq.${row.id}` },
+            { company_type: 'subcontractor' },
+          )),
+        supabaseUpsert('contractors', contractor),
+        supabaseUpdate(
+          'workers',
+          { contractor_id: `eq.${contractor.id}`, status: 'eq.active' },
+          { contractor_name: contractor.name, updated_at: now },
+        ),
+        supabaseUpdate(
+          'managers',
+          { contractor_id: `eq.${contractor.id}`, status: 'eq.active' },
+          { status: 'disabled', session_version: randomUUID(), updated_at: now },
+        ),
+      ]);
+    } else {
+      await supabaseUpsert('contractors', contractor);
+    }
+    return { contractors: 1 };
+  }
+
+  if (action === 'adminCreateManager') {
+    const manager = managerRowFromBundle(result);
+    if (!manager) throw new UserInputError('管理者資料格式不正確');
+    await supabaseUpsert('managers', manager);
+    return { managers: 1 };
+  }
+
+  throw new UserInputError('不支援的 Supabase 鏡像操作');
+}
+
 export class UserInputError extends Error {
   constructor(message) {
     super(message);
@@ -394,18 +448,20 @@ async function getActiveContractor(id) {
 }
 
 async function assertNoDuplicateWorker(input, contractorId, excludedId = '') {
-  const idRows = await supabaseSelect('workers', {
-    id_number: `eq.${input.idNumber}`,
-    status: 'eq.active',
-    limit: '1',
-  });
+  const [idRows, profileRows] = await Promise.all([
+    supabaseSelect('workers', {
+      id_number: `eq.${input.idNumber}`,
+      status: 'eq.active',
+      limit: '1',
+    }),
+    supabaseSelect('workers', {
+      contractor_id: `eq.${contractorId}`,
+      status: 'eq.active',
+    }),
+  ]);
   if (idRows[0] && idRows[0].id !== excludedId) {
     throw new UserInputError('此身分證／居留證號已有在冊資料');
   }
-  const profileRows = await supabaseSelect('workers', {
-    contractor_id: `eq.${contractorId}`,
-    status: 'eq.active',
-  });
   const duplicate = profileRows.find((row) =>
     row.id !== excludedId
     && normalizeText(row.name).toLowerCase() === normalizeText(input.name).toLowerCase()
