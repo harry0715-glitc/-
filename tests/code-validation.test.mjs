@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { readFileSync } from 'node:fs';
 
-const source = readFileSync(new URL('../Code.gs', import.meta.url), 'utf8');
+const source = readFileSync(new URL('../Code.js', import.meta.url), 'utf8');
 const validation = new Function(
   `${source}\nreturn { validateIdNumber_, requireDate_, contractorType_, contractorLevelLabel_, sortContractors_, estimateWorkerPageUnits_ };`
 )();
