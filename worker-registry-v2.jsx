@@ -57,14 +57,18 @@ const withTimeout = async (url, options = {}, timeoutMs = 20000) => {
 };
 
 const readJson = async (response) => {
-  let body;
+  const text = await response.text();
+  let body = null;
   try {
-    body = await response.json();
+    body = text ? JSON.parse(text) : null;
   } catch {
-    throw new Error('伺服器回應格式不正確');
+    if (response.status === 502 || response.status === 504 || /timed?\s*out|timeout/i.test(text)) {
+      throw new Error('伺服器處理逾時，請稍後再試');
+    }
+    throw new Error(`伺服器暫時無法處理（${response.status || '網路錯誤'}）`);
   }
-  if (!response.ok || !body.ok) {
-    const error = new Error(body.error || '操作失敗');
+  if (!response.ok || !body?.ok) {
+    const error = new Error(body?.error || '操作失敗');
     if (response.status === 401) error.code = SESSION_EXPIRED;
     throw error;
   }
@@ -97,7 +101,7 @@ const API = {
       credentials: 'include',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ action, payload })
-    }, action === 'adminGenerateReport' || action === 'adminSyncSupabase' ? 90000 : 30000);
+    }, action === 'adminSyncSupabase' ? 90000 : 30000);
     return readJson(response);
   }
 };
@@ -106,6 +110,35 @@ const todayKey = () => {
   const now = new Date();
   const pad = (value) => String(value).padStart(2, '0');
   return `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
+};
+
+const taiwanDateKey = (value) => {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return '';
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Taipei',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit'
+  }).formatToParts(date);
+  const read = (type) => parts.find((part) => part.type === type)?.value || '';
+  return `${read('year')}-${read('month')}-${read('day')}`;
+};
+
+const mapWithConcurrency = async (items, limit, callback) => {
+  const results = new Array(items.length);
+  let nextIndex = 0;
+  const runner = async () => {
+    while (nextIndex < items.length) {
+      const index = nextIndex++;
+      results[index] = await callback(items[index], index);
+    }
+  };
+  await Promise.all(Array.from(
+    { length: Math.min(limit, Math.max(1, items.length)) },
+    () => runner()
+  ));
+  return results;
 };
 
 const contractorLevelLabel = (contractor) =>
@@ -1898,21 +1931,62 @@ function ReportsTab({ data, showToast, adminCall }) {
   const [loading, setLoading] = useState('');
   const [result, setResult] = useState(null);
 
+  useEffect(() => () => {
+    if (result?.url?.startsWith('blob:')) URL.revokeObjectURL(result.url);
+  }, [result]);
+
   const generate = async (type) => {
     if (type === 'company' && !contractorId) {
       showToast('請選擇承包商', 'error');
       return;
     }
     setLoading(type);
+    if (result?.url?.startsWith('blob:')) URL.revokeObjectURL(result.url);
     setResult(null);
     try {
-      const report = await adminCall('adminGenerateReport', {
-        type,
-        date,
-        contractorId
+      const selectedContractor = data.contractors.find((item) => item.id === contractorId);
+      const workers = data.workers
+        .filter((worker) => type === 'daily'
+          ? taiwanDateKey(worker.createdAt) === date
+          : worker.contractorId === contractorId)
+        .sort((left, right) => (
+          (left.companyType === 'primary' ? 0 : 1) - (right.companyType === 'primary' ? 0 : 1)
+          || String(left.contractorName).localeCompare(String(right.contractorName), 'zh-Hant')
+          || String(left.name).localeCompare(String(right.name), 'zh-Hant')
+        ));
+      const photos = await mapWithConcurrency(workers, 4, async (worker) => {
+        const photo = await adminCall('adminGetPhoto', { id: worker.id });
+        if (!photo?.dataUrl) throw new Error(`「${worker.name}」的照片讀取失敗，請重新上傳照片`);
+        return photo.dataUrl;
       });
+      const scopeLabel = type === 'daily'
+        ? (owner ? '全部公司（含主承包商與次承包商）' : `次承包商：${data.profile.contractorName}`)
+        : (selectedContractor?.companyType === 'primary'
+          ? `主承包商自有人員：${selectedContractor.name}`
+          : `次承包商人員：${selectedContractor?.name || data.profile.contractorName}`);
+      const reportName = type === 'daily' ? '每日新增人員名冊' : '公司完整人員名冊';
+      const filenameLabel = type === 'daily'
+        ? `每日新增_${date}${owner ? '' : `_${data.profile.contractorName}`}`
+        : `公司完整名冊_${selectedContractor?.name || data.profile.contractorName}`;
+      const filename = `${data.primaryContractor?.name || '主承包商'}_施工人員名冊_${filenameLabel}.pdf`;
+      const { createRosterPdf } = await import('./client-pdf.mjs');
+      const blob = await createRosterPdf({
+        primaryContractorName: data.primaryContractor?.name,
+        reportName,
+        scopeLabel,
+        dataBasis: type === 'daily' ? `登記日期：${date}` : `資料截至：${new Date().toLocaleString('zh-TW')}`,
+        workers,
+        photos
+      });
+      const report = {
+        filename,
+        url: URL.createObjectURL(blob),
+        scopeLabel,
+        count: workers.length,
+        source: 'browser'
+      };
       setResult(report);
-      showToast('PDF 已產生');
+      showToast('PDF 已在此裝置產生');
     } catch (error) {
       showToast(`產生失敗：${error.message}`, 'error');
     } finally {
@@ -1980,9 +2054,9 @@ function ReportsTab({ data, showToast, adminCall }) {
             <p className="truncate font-bold text-white">{result.filename}</p>
             <p className="text-xs text-zinc-500">{result.scopeLabel} · 共 {result.count} 位人員</p>
           </div>
-          <a href={result.url} target="_blank" rel="noreferrer" className="flex items-center justify-center gap-2 rounded-lg bg-emerald-600 px-4 py-2.5 text-sm font-bold text-white">
+          <a href={result.url} download={result.filename} className="flex items-center justify-center gap-2 rounded-lg bg-emerald-600 px-4 py-2.5 text-sm font-bold text-white">
             <Download className="h-4 w-4" />
-            開啟 PDF
+            下載 PDF
           </a>
         </section>
       )}

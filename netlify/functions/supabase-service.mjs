@@ -14,10 +14,6 @@ import {
   supabaseUploadPhoto,
   supabaseUpsert,
 } from './supabase-client.mjs';
-import {
-  createSupabaseRosterPdf,
-  ReportGenerationError,
-} from './pdf-report.mjs';
 
 const MAX_PHOTO_CHARACTERS = 8_100_000;
 const MAX_PREVIEW_BYTES = 2_500_000;
@@ -433,79 +429,6 @@ export async function getWorkerPhotoFromSupabase(input, actor) {
   }
   if (worker.photo_file_id) return { legacy: true };
   throw new UserInputError('此人員沒有照片');
-}
-
-export async function generateReportFromSupabase(input, actor, options = {}) {
-  const type = String(input.type || '');
-  if (type !== 'daily' && type !== 'company') throw new UserInputError('報表類型不正確');
-  const date = type === 'daily' ? requireDate(input.date, '報表日期') : '';
-  const workerParams = { status: 'eq.active', order: 'created_at.desc' };
-  if (actor.role === 'contractor') workerParams.contractor_id = `eq.${actor.contractorId}`;
-  const [contractorRows, workerRows] = await Promise.all([
-    supabaseSelect('contractors', {
-      select: 'id,name,company_type,status,created_at',
-      status: 'eq.active',
-      order: 'company_type.asc,name.asc',
-    }),
-    supabaseSelect('workers', {
-      select: 'id,name,id_number,phone,emergency_contact,emergency_phone,blood_type,job_title,contractor_id,contractor_name,entry_date,notes,photo_storage_path,photo_file_id,created_at,updated_at',
-      ...workerParams,
-    }),
-  ]);
-  const contractors = contractorRows.map(contractorSummaryFromRow).sort(compareContractors);
-  const primaryContractor = contractors.find((item) => item.companyType === 'primary') || null;
-  if (!primaryContractor) throw new UserInputError('請先設定主承包商公司名稱');
-
-  let workers = workerRows.map((row) => workerForReport(row, contractors));
-  let selectedContractor = null;
-  if (type === 'daily') {
-    workers = workers.filter((worker) => dateKeyTaiwan(worker.createdAt) === date);
-  } else {
-    const contractorId = actor.role === 'contractor'
-      ? actor.contractorId
-      : requireText(input.contractorId, '承包商', 100);
-    selectedContractor = contractors.find((item) => item.id === contractorId);
-    if (!selectedContractor) throw new UserInputError('找不到承包商');
-    workers = workers.filter((worker) => worker.contractorId === contractorId);
-  }
-
-  workers.sort((left, right) => (
-    (left.companyType === 'primary' ? 0 : 1) - (right.companyType === 'primary' ? 0 : 1)
-    || String(left.contractorName).localeCompare(String(right.contractorName), 'zh-Hant')
-    || String(left.name).localeCompare(String(right.name), 'zh-Hant')
-  ));
-  const report = {
-    type,
-    date,
-    reportName: type === 'daily' ? '每日新增人員名冊' : '公司完整人員名冊',
-    scopeLabel: type === 'daily'
-      ? (actor.role === 'contractor'
-        ? `次承包商：${actor.contractorName}`
-        : '全部公司（含主承包商與次承包商）')
-      : (selectedContractor.companyType === 'primary'
-        ? `主承包商自有人員：${selectedContractor.name}`
-        : `次承包商人員：${selectedContractor.name}`),
-    dataBasis: type === 'daily'
-      ? `登記日期：${date}`
-      : `資料截至：${new Date().toISOString()}`,
-    filenameLabel: type === 'daily'
-      ? `每日新增_${date}${actor.role === 'contractor' ? `_${actor.contractorName}` : ''}`
-      : `公司完整名冊_${selectedContractor.name}`,
-    primaryContractorName: primaryContractor.name,
-  };
-
-  try {
-    return await createSupabaseRosterPdf({
-      report,
-      workers,
-      legacyPhotoLoader: options.legacyPhotoLoader,
-    });
-  } catch (error) {
-    if (error instanceof ReportGenerationError) {
-      throw new UserInputError(error.message);
-    }
-    throw error;
-  }
 }
 
 export async function syncBundleToSupabase(bundle) {
@@ -990,31 +913,6 @@ function workerSummaryFromRow(row, contractorMap) {
   };
 }
 
-function workerForReport(row, contractors) {
-  const contractor = contractors.find((item) => item.id === row.contractor_id);
-  const photoFileId = String(row.photo_file_id || row.photoFileId || '').trim();
-  const photoStoragePath = String(row.photo_storage_path || row.photoStoragePath || '').trim();
-  return {
-    id: String(row.id),
-    name: row.name,
-    idNumber: row.id_number,
-    phone: row.phone,
-    emergencyContact: row.emergency_contact,
-    emergencyPhone: row.emergency_phone,
-    bloodType: row.blood_type,
-    jobTitle: row.job_title,
-    contractorId: row.contractor_id,
-    contractorName: row.contractor_name,
-    companyType: contractor?.companyType || 'subcontractor',
-    entryDate: row.entry_date,
-    notes: row.notes || '',
-    createdAt: row.created_at,
-    updatedAt: row.updated_at,
-    photoFileId,
-    photoStoragePath,
-  };
-}
-
 function managerFromRow(row) {
   return {
     id: String(row.id),
@@ -1080,17 +978,4 @@ function normalizeSupabaseWriteError(error) {
     return new UserInputError('資料已存在，請重新整理後再試');
   }
   return error;
-}
-
-function dateKeyTaiwan(value) {
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return '';
-  const parts = new Intl.DateTimeFormat('en-CA', {
-    timeZone: 'Asia/Taipei',
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-  }).formatToParts(date);
-  const values = Object.fromEntries(parts.map((item) => [item.type, item.value]));
-  return `${values.year}-${values.month}-${values.day}`;
 }
