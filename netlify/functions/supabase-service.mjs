@@ -96,6 +96,7 @@ export async function getAdminDataFromSupabase(actor) {
   const primaryContractor = contractors.find((item) => item.companyType === 'primary') || null;
 
   return {
+    dataSource: 'supabase',
     profile: managerProfileFromActor(actor),
     primaryContractor,
     contractors: owner

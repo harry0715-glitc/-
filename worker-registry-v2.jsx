@@ -2034,6 +2034,9 @@ function SettingsTab({ data, setData, showToast, adminCall, onLogout }) {
         <p className="mt-1 text-xs text-zinc-500">
           {data.profile.displayName} · {owner ? `主要管理者｜${data.primaryContractor?.name || '主承包商尚未設定'}` : data.profile.contractorName}
         </p>
+        <p className="mt-2 text-xs text-zinc-500">
+          目前資料來源：<span className={data.dataSource === 'supabase' ? 'text-cyan-400' : 'text-orange-400'}>{data.dataSource === 'supabase' ? 'Supabase' : 'Google Sheets'}</span>
+        </p>
       </div>
       <div className="grid gap-4 lg:grid-cols-2">
         <PasswordPanel

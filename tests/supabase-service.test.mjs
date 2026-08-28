@@ -99,6 +99,7 @@ test('Supabase admin data preserves contractor scoping and existing field names'
     contractorName: '乙次承包商',
     mustChangePassword: false,
   });
+  assert.equal(result.dataSource, 'supabase');
   assert.equal(result.profile.contractorId, 'sub-1');
   assert.deepEqual(result.contractors.map((item) => item.id), ['sub-1']);
   assert.equal(result.workers[0].idNumber, 'A123456789');

@@ -290,6 +290,13 @@ async function handler(event) {
     );
   }
 
+  if (request.action === "adminGetData" && isRecord(upstreamBody.data)) {
+    return jsonResponse(200, {
+      ...upstreamBody,
+      data: { ...upstreamBody.data, dataSource: "gas" }
+    });
+  }
+
   return jsonResponse(200, upstreamBody);
 }
 
