@@ -278,6 +278,205 @@ test('admin gateway adds a contractor through Supabase without calling Apps Scri
   assert.deepEqual(upstreamRequests.map((item) => item.action), ['adminLogin']);
 });
 
+test('admin gateway archives a Supabase-only contractor even when legacy Google cleanup cannot find it', { concurrency: false }, async () => {
+  setAdminConfig();
+  process.env.SUPABASE_URL = 'https://example.supabase.co';
+  process.env.SUPABASE_SERVICE_ROLE_KEY = 'server-key-for-test-only';
+  process.env.SUPABASE_DATA_MODE = 'supabase';
+
+  const upstreamActions = [];
+  const managerRow = {
+    id: 'manager-1',
+    username: 'owner@example.com',
+    display_name: '主要管理者',
+    email: 'owner@example.com',
+    role: 'owner',
+    contractor_id: null,
+    contractor_name: '',
+    status: 'active',
+    must_change_password: false,
+    session_version: 'session-version-1',
+  };
+  let contractorArchived = false;
+
+  globalThis.fetch = async (url, options = {}) => {
+    const text = String(url);
+    const method = options.method || 'GET';
+    const contentType = options.headers?.['Content-Type'] || options.headers?.['content-type'] || '';
+    const body = options.body && String(contentType).includes('application/json')
+      ? JSON.parse(options.body)
+      : null;
+    if (text === APPS_SCRIPT_URL) {
+      upstreamActions.push(body.action);
+      if (body.action === 'adminLogin') {
+        return new Response(JSON.stringify({
+          ok: true,
+          data: {
+            profile: { id: 'manager-1', role: 'owner', email: 'owner@example.com' },
+            sessionVersion: 'session-version-1',
+          },
+        }), { status: 200 });
+      }
+      if (body.action === 'adminArchiveContractor') {
+        return new Response(JSON.stringify({ ok: false, error: '找不到承包商' }), { status: 200 });
+      }
+      throw new Error(`Unexpected GAS action: ${body.action}`);
+    }
+    if (text.includes('/rest/v1/managers') && method === 'POST') {
+      return new Response(JSON.stringify([managerRow]), { status: 201 });
+    }
+    if (text.includes('/rest/v1/managers?') && method === 'GET') {
+      return new Response(JSON.stringify([managerRow]), { status: 200 });
+    }
+    if (text.includes('/rest/v1/managers?') && method === 'PATCH') {
+      return new Response('[]', { status: 200 });
+    }
+    if (text.includes('/rest/v1/contractors?') && method === 'GET') {
+      return new Response(JSON.stringify([
+        { id: 'sub-1', name: '乙次承包商', company_type: 'subcontractor', status: 'active' },
+      ]), { status: 200 });
+    }
+    if (text.includes('/rest/v1/workers?') && method === 'GET') {
+      return new Response('[]', { status: 200 });
+    }
+    if (text.includes('/rest/v1/contractors?') && method === 'PATCH') {
+      contractorArchived = true;
+      return new Response(JSON.stringify([
+        { id: 'sub-1', name: '乙次承包商', company_type: 'subcontractor', status: 'archived' },
+      ]), { status: 200 });
+    }
+    if (text.endsWith('/rest/v1/audit_logs')) {
+      return new Response('[]', { status: 201 });
+    }
+    throw new Error(`Unexpected request: ${method} ${text}`);
+  };
+
+  const loggedIn = await login();
+  const response = await adminApi(request('/api/admin', {
+    action: 'adminArchiveContractor',
+    payload: { id: 'sub-1', contractorName: '乙次承包商' },
+  }, { Cookie: loggedIn.cookie }));
+  const responseBody = await response.json();
+
+  assert.equal(response.status, 200);
+  assert.equal(responseBody.data.id, 'sub-1');
+  assert.equal(contractorArchived, true);
+  assert.deepEqual(upstreamActions, ['adminLogin', 'adminArchiveContractor']);
+});
+
+test('admin login rejects a manager whose Supabase contractor is archived', { concurrency: false }, async () => {
+  setAdminConfig();
+  process.env.SUPABASE_URL = 'https://example.supabase.co';
+  process.env.SUPABASE_SERVICE_ROLE_KEY = 'server-key-for-test-only';
+  process.env.SUPABASE_DATA_MODE = 'supabase';
+
+  globalThis.fetch = async (url, options = {}) => {
+    const text = String(url);
+    if (text === APPS_SCRIPT_URL) {
+      return new Response(JSON.stringify({
+        ok: true,
+        data: {
+          profile: {
+            id: 'manager-archived',
+            role: 'contractor',
+            contractorId: 'sub-archived',
+            email: 'archived@example.com',
+          },
+          sessionVersion: 'session-version-1',
+        },
+      }), { status: 200 });
+    }
+    if (text.includes('/rest/v1/contractors?')) {
+      return new Response('[]', { status: 200 });
+    }
+    throw new Error(`Unexpected request: ${options.method || 'GET'} ${text}`);
+  };
+
+  const response = await adminApi(request('/api/admin', {
+    action: 'login',
+    payload: { username: 'archived@example.com', password: 'not-a-real-password' },
+  }));
+  const responseBody = await response.json();
+
+  assert.equal(response.status, 401);
+  assert.match(responseBody.error, /已停用/);
+  assert.equal(response.headers.get('set-cookie'), null);
+});
+
+test('admin gateway revokes an existing contractor session after its company is archived', { concurrency: false }, async () => {
+  setAdminConfig();
+  process.env.SUPABASE_URL = 'https://example.supabase.co';
+  process.env.SUPABASE_SERVICE_ROLE_KEY = 'server-key-for-test-only';
+  process.env.SUPABASE_DATA_MODE = 'supabase';
+
+  let contractorActive = true;
+  const gasActions = [];
+  const profile = {
+    id: 'manager-1',
+    role: 'contractor',
+    contractorId: 'sub-1',
+    contractorName: '乙次承包商',
+    email: 'manager@example.com',
+  };
+  const managerRow = {
+    id: 'manager-1',
+    username: 'manager@example.com',
+    display_name: '次管理者',
+    email: 'manager@example.com',
+    role: 'contractor',
+    contractor_id: 'sub-1',
+    contractor_name: '乙次承包商',
+    status: 'active',
+    must_change_password: false,
+    session_version: 'session-version-1',
+  };
+
+  globalThis.fetch = async (url, options = {}) => {
+    const text = String(url);
+    const contentType = options.headers?.['Content-Type'] || options.headers?.['content-type'] || '';
+    const body = options.body && String(contentType).includes('application/json')
+      ? JSON.parse(options.body)
+      : null;
+    if (text === APPS_SCRIPT_URL) {
+      gasActions.push(body.action);
+      if (body.action === 'adminLogin') {
+        return new Response(JSON.stringify({
+          ok: true,
+          data: { profile, sessionVersion: 'session-version-1' },
+        }), { status: 200 });
+      }
+      if (body.action === 'adminGetSession') {
+        return new Response(JSON.stringify({ ok: true, data: { profile } }), { status: 200 });
+      }
+      throw new Error(`Unexpected GAS action: ${body.action}`);
+    }
+    if (text.includes('/rest/v1/contractors?')) {
+      return new Response(JSON.stringify(contractorActive ? [
+        { id: 'sub-1', name: '乙次承包商', company_type: 'subcontractor', status: 'active' },
+      ] : []), { status: 200 });
+    }
+    if (text.includes('/rest/v1/managers') && options.method === 'POST') {
+      return new Response(JSON.stringify([managerRow]), { status: 201 });
+    }
+    if (text.includes('/rest/v1/managers?') && (options.method || 'GET') === 'GET') {
+      return new Response(JSON.stringify(contractorActive ? [managerRow] : []), { status: 200 });
+    }
+    throw new Error(`Unexpected request: ${options.method || 'GET'} ${text}`);
+  };
+
+  const loggedIn = await login();
+  contractorActive = false;
+  const response = await adminApi(request('/api/admin', {
+    action: 'adminGetData',
+    payload: {},
+  }, { Cookie: loggedIn.cookie }));
+  const responseBody = await response.json();
+
+  assert.equal(response.status, 401);
+  assert.match(responseBody.error, /工作階段已失效/);
+  assert.deepEqual(gasActions, ['adminLogin', 'adminGetSession']);
+});
+
 test('admin gateway generates Supabase PDF and bridges only legacy photos to Apps Script', { concurrency: false }, async () => {
   setAdminConfig();
   process.env.SUPABASE_URL = 'https://example.supabase.co';

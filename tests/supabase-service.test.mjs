@@ -3,10 +3,12 @@ import { afterEach, test } from 'node:test';
 
 import {
   addContractorInSupabase,
+  archiveContractorInSupabase,
   createSupabaseBackup,
   getAdminDataFromSupabase,
   getPublicConfigFromSupabase,
   generateReportFromSupabase,
+  syncManagerFromLogin,
   syncActionResultToSupabase,
   syncBundleToSupabase,
 } from '../netlify/functions/supabase-service.mjs';
@@ -139,6 +141,105 @@ test('Supabase adds a contractor directly without calling Apps Script', async ()
   assert.equal(result.companyType, 'subcontractor');
   assert.ok(requests.some((request) => request.url.endsWith('/rest/v1/contractors')));
   assert.equal(requests.some((request) => request.url.includes('script.google.com')), false);
+});
+
+test('Supabase archives a subcontractor directly and disables its managers', async () => {
+  enableSupabase();
+  const requests = [];
+  globalThis.fetch = async (url, options = {}) => {
+    const text = String(url);
+    const method = options.method || 'GET';
+    const body = options.body && String(options.headers?.['Content-Type'] || '').includes('application/json')
+      ? JSON.parse(options.body)
+      : null;
+    requests.push({ url: text, method, body });
+    if (text.includes('/rest/v1/contractors?') && method === 'GET') {
+      return new Response(JSON.stringify([
+        { id: 'sub-1', name: '乙次承包商', company_type: 'subcontractor', status: 'active' },
+      ]), { status: 200 });
+    }
+    if (text.includes('/rest/v1/workers?') && method === 'GET') {
+      return new Response('[]', { status: 200 });
+    }
+    if (text.includes('/rest/v1/contractors?') && method === 'PATCH') {
+      return new Response(JSON.stringify([
+        { id: 'sub-1', name: '乙次承包商', company_type: 'subcontractor', status: 'archived' },
+      ]), { status: 200 });
+    }
+    if (text.includes('/rest/v1/managers?') && method === 'PATCH') {
+      return new Response('[]', { status: 200 });
+    }
+    if (text.endsWith('/rest/v1/audit_logs') && method === 'POST') {
+      return new Response('[]', { status: 201 });
+    }
+    throw new Error(`Unexpected request: ${method} ${text}`);
+  };
+
+  const result = await archiveContractorInSupabase(
+    { id: 'sub-1' },
+    { id: 'owner-1', role: 'owner' },
+  );
+
+  assert.deepEqual(result, { id: 'sub-1', name: '乙次承包商' });
+  assert.ok(requests.some((item) => item.method === 'PATCH'
+    && item.url.includes('/contractors?') && item.body?.status === 'archived'));
+  assert.ok(requests.some((item) => item.method === 'PATCH'
+    && item.url.includes('/managers?') && item.body?.status === 'disabled'));
+});
+
+test('Supabase refuses to archive a primary contractor or a subcontractor with workers', async () => {
+  enableSupabase();
+  let contractorType = 'primary';
+  globalThis.fetch = async (url) => {
+    const text = String(url);
+    if (text.includes('/rest/v1/contractors?')) {
+      return new Response(JSON.stringify([
+        { id: 'co-1', name: '測試公司', company_type: contractorType, status: 'active' },
+      ]), { status: 200 });
+    }
+    if (text.includes('/rest/v1/workers?')) {
+      return new Response(JSON.stringify([{ id: 'worker-1' }]), { status: 200 });
+    }
+    throw new Error(`Unexpected request: ${text}`);
+  };
+
+  await assert.rejects(
+    () => archiveContractorInSupabase(
+      { id: 'co-1' },
+      { id: 'owner-1', role: 'owner' },
+    ),
+    /主承包商不可封存/
+  );
+
+  contractorType = 'subcontractor';
+  await assert.rejects(
+    () => archiveContractorInSupabase(
+      { id: 'co-1' },
+      { id: 'owner-1', role: 'owner' },
+    ),
+    /仍有在冊人員/
+  );
+});
+
+test('Supabase rejects login synchronization for an archived contractor', async () => {
+  enableSupabase();
+  globalThis.fetch = async (url) => {
+    const text = String(url);
+    if (text.includes('/rest/v1/contractors?')) {
+      return new Response('[]', { status: 200 });
+    }
+    throw new Error(`Unexpected request: ${text}`);
+  };
+
+  await assert.rejects(
+    () => syncManagerFromLogin({
+      id: 'manager-1',
+      role: 'contractor',
+      contractorId: 'sub-archived',
+      email: 'manager@example.com',
+    }, 'session-version-1'),
+    /已停用/
+  );
 });
 
 test('Supabase reports generate a PDF directly and embed a private photo', async () => {

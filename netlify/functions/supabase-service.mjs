@@ -68,14 +68,31 @@ export function managerProfileFromSession(actor) {
 
 export async function syncManagerFromLogin(profile, sessionVersion) {
   if (!profile?.id || !sessionVersion || !isSupabaseConfigured()) return null;
+  const role = profile.role === 'owner' ? 'owner' : 'contractor';
+  let contractorId = profile.contractorId ? String(profile.contractorId) : null;
+  let contractorName = String(profile.contractorName || '');
+  if (role === 'contractor') {
+    if (!contractorId) throw new UserInputError('管理帳號尚未綁定次承包商');
+    const contractorRows = await supabaseSelect('contractors', {
+      select: 'id,name,company_type,status',
+      id: `eq.${contractorId}`,
+      company_type: 'eq.subcontractor',
+      status: 'eq.active',
+      limit: '1',
+    });
+    const contractor = contractorRows[0];
+    if (!contractor) throw new UserInputError('所屬次承包商已停用，請聯絡主要管理者');
+    contractorId = String(contractor.id);
+    contractorName = String(contractor.name || '');
+  }
   const row = {
     id: String(profile.id),
     username: String(profile.username || profile.email || '').trim().toLowerCase(),
     display_name: String(profile.displayName || profile.email || '管理者').trim(),
     email: String(profile.email || profile.username || '').trim().toLowerCase(),
-    role: profile.role === 'owner' ? 'owner' : 'contractor',
-    contractor_id: profile.contractorId ? String(profile.contractorId) : null,
-    contractor_name: String(profile.contractorName || ''),
+    role,
+    contractor_id: contractorId,
+    contractor_name: contractorName,
     status: 'active',
     must_change_password: Boolean(profile.mustChangePassword),
     session_version: String(sessionVersion),
@@ -225,6 +242,45 @@ export async function addContractorInSupabase(input, actor) {
   // Audit logging is best effort so a slow log request cannot delay the user action.
   void writeAudit(actor, 'create', 'contractor', contractor.id, name);
   return contractorSummaryFromRow(contractor);
+}
+
+export async function archiveContractorInSupabase(input, actor) {
+  if (actor?.role !== 'owner') throw new UserInputError('僅主要管理者可封存承包商');
+
+  const id = requireText(input.id, '承包商 ID', 100);
+  const contractorRows = await supabaseSelect('contractors', {
+    select: 'id,name,company_type,status',
+    id: `eq.${id}`,
+    status: 'eq.active',
+    limit: '1',
+  });
+  const contractor = contractorRows[0];
+  if (!contractor) throw new UserInputError('承包商已停用或不存在');
+  if (contractor.company_type === 'primary') {
+    throw new UserInputError('主承包商不可封存；如需更名請至帳號與系統設定');
+  }
+
+  await assertNoActiveWorkersInSupabase(id);
+  const now = new Date().toISOString();
+  const [archivedRows] = await Promise.all([
+    supabaseUpdate(
+      'contractors',
+      { id: `eq.${id}`, status: 'eq.active', company_type: 'eq.subcontractor' },
+      { status: 'archived', archived_at: now },
+    ),
+    supabaseUpdate(
+      'managers',
+      { contractor_id: `eq.${id}`, status: 'eq.active' },
+      { status: 'disabled', session_version: randomUUID(), updated_at: now },
+      { returnRepresentation: false },
+    ),
+  ]);
+  if (archivedRows.length !== 1) {
+    throw new SupabaseError('承包商封存未完成，請重新整理後再試', 409, 'ARCHIVE_CONFLICT');
+  }
+
+  void writeAudit(actor, 'archive', 'contractor', id, contractor.name);
+  return { id, name: String(contractor.name || '') };
 }
 
 export async function createWorkerInSupabase(input, actor, source) {

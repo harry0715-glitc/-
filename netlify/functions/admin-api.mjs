@@ -4,6 +4,7 @@ import { SupabaseError, isSupabaseConfigured, isSupabaseEnabled } from "./supaba
 import { photoFromDataUrl } from "./pdf-report.mjs";
 import {
   addContractorInSupabase,
+  archiveContractorInSupabase,
   createWorkerInSupabase,
   createSupabaseBackup,
   deleteWorkerInSupabase,
@@ -11,7 +12,6 @@ import {
   getAdminDataFromSupabase,
   getManagerBySession,
   getWorkerPhotoFromSupabase,
-  assertNoActiveWorkersInSupabase,
   managerProfileFromSession,
   syncBundleToSupabase,
   syncActionResultToSupabase,
@@ -32,6 +32,7 @@ const BASE64URL_PATTERN = /^[A-Za-z0-9_-]+$/;
 const SUPABASE_FAST_ACTIONS = new Set([
   "adminGetData",
   "adminAddContractor",
+  "adminArchiveContractor",
   "adminAddWorker",
   "adminUpdateWorker",
   "adminDeleteWorker",
@@ -42,7 +43,6 @@ const SUPABASE_FAST_ACTIONS = new Set([
 const SUPABASE_MIRROR_ACTIONS = new Set([
   "adminUpdatePrimaryContractor",
   "adminAddContractor",
-  "adminArchiveContractor",
   "adminCreateManager",
   "adminResetManagerPassword",
   "adminSetManagerStatus",
@@ -142,6 +142,12 @@ async function handler(event) {
         await syncManagerFromLogin(authenticated.data.profile, identity.sessionVersion);
       } catch (error) {
         console.warn(`Supabase 管理者同步失敗：${error.message}`);
+        return jsonResponse(error instanceof UserInputError ? 401 : 503, {
+          ok: false,
+          error: error instanceof UserInputError
+            ? error.message
+            : "Supabase 登入服務暫時無法使用，請稍後再試"
+        });
       }
     }
 
@@ -173,10 +179,12 @@ async function handler(event) {
   );
 
   let supabaseActor = null;
+  let supabaseSessionFailure = null;
   if (isSupabaseEnabled()) {
     try {
       supabaseActor = await getManagerBySession(session.managerId, session.sessionVersion);
     } catch (error) {
+      supabaseSessionFailure = error;
       console.warn(`Supabase 工作階段檢查失敗：${error.message}`);
     }
   }
@@ -187,16 +195,20 @@ async function handler(event) {
     try {
       supabaseActor = await recoverSupabaseActor(config, session, actorToken);
     } catch (error) {
+      supabaseSessionFailure = error;
       console.warn(`Supabase 管理者補同步失敗：${error.message}`);
     }
   }
 
-  if (request.action === "adminArchiveContractor" && supabaseActor) {
-    try {
-      await assertNoActiveWorkersInSupabase(payload.id);
-    } catch (error) {
-      return supabaseErrorResponse(error);
-    }
+  if (isSupabaseEnabled() && !supabaseActor) {
+    const serviceUnavailable = supabaseSessionFailure
+      && !(supabaseSessionFailure instanceof UserInputError);
+    return jsonResponse(serviceUnavailable ? 503 : 401, {
+      ok: false,
+      error: serviceUnavailable
+        ? "Supabase 工作階段服務暫時無法使用，請稍後再試"
+        : "管理工作階段已失效，請重新登入"
+    });
   }
 
   if (request.action === "adminGetSession" && supabaseActor) {
@@ -235,15 +247,6 @@ async function handler(event) {
     }
   }
 
-  // Reports should never silently fall back to the slower Google PDF path
-  // while Supabase is active, because that path can require DocumentApp access.
-  if (isSupabaseEnabled() && request.action === "adminGenerateReport" && !supabaseActor) {
-    return jsonResponse(503, {
-      ok: false,
-      error: "Supabase 管理工作階段尚未同步，請先登出管理後台，再重新登入"
-    });
-  }
-
   if (supabaseActor && SUPABASE_FAST_ACTIONS.has(request.action)) {
     try {
       let result;
@@ -251,6 +254,23 @@ async function handler(event) {
         result = await getAdminDataFromSupabase(supabaseActor);
       } else if (request.action === "adminAddContractor") {
         result = await addContractorInSupabase(payload, supabaseActor);
+      } else if (request.action === "adminArchiveContractor") {
+        result = await archiveContractorInSupabase(payload, supabaseActor);
+        try {
+          await callGasAction(
+            config,
+            "adminArchiveContractor",
+            {
+              id: result.id,
+              contractorName: result.name,
+              skipLegacyWorkerCheck: true
+            },
+            actorToken,
+            UPSTREAM_TIMEOUT_MS
+          );
+        } catch (error) {
+          console.warn(`Google 承包商清理未完成：${error.message}`);
+        }
       } else if (request.action === "adminAddWorker") {
         result = await createWorkerInSupabase(payload, supabaseActor, "manager");
       } else if (request.action === "adminUpdateWorker") {

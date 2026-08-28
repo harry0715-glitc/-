@@ -176,6 +176,7 @@ async function renderRosterPdf(report, workers, photos, fonts) {
       margin: 0,
       compress: true,
       autoFirstPage: false,
+      font: fonts.regular,
     });
     const chunks = [];
     let pageNumber = 0;

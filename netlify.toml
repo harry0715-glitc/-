@@ -8,7 +8,10 @@
 [functions]
   directory = "netlify/functions"
   node_bundler = "esbuild"
-  included_files = ["netlify/functions/assets/**"]
+  included_files = [
+    "netlify/functions/assets/**",
+    "node_modules/pdfkit/js/standard-fonts/**"
+  ]
 
 [[headers]]
   for = "/*"
