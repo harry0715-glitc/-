@@ -9,6 +9,7 @@ const SCHEMA_VERSION = '6';
 const CONTRACTOR_TYPE_PRIMARY = 'primary';
 const CONTRACTOR_TYPE_SUBCONTRACTOR = 'subcontractor';
 const PUBLIC_CONFIG_CACHE_KEY = 'workers_registry_public_config_v1';
+const PUBLIC_CONFIG_PROPERTY_KEY = 'PUBLIC_CONFIG_SNAPSHOT_V1';
 const PUBLIC_CONFIG_CACHE_SECONDS = 300;
 const TAIWAN_ID_AREA_CODES = {
   A: 10, B: 11, C: 12, D: 13, E: 14, F: 15, G: 16, H: 17,
@@ -916,11 +917,35 @@ function clearPublicConfigCache_() {
   } catch (err) {
     console.warn('清除公開設定快取失敗：' + err.message);
   }
+  PropertiesService.getScriptProperties().deleteProperty(PUBLIC_CONFIG_PROPERTY_KEY);
 }
 
 function getPublicConfig_() {
   const cached = getPublicConfigCache_();
   if (cached) return cached;
+
+  const props = PropertiesService.getScriptProperties();
+  const snapshot = props.getProperty(PUBLIC_CONFIG_PROPERTY_KEY);
+  if (snapshot) {
+    try {
+      const persisted = JSON.parse(snapshot);
+      if (persisted && Array.isArray(persisted.contractors)) {
+        try {
+          CacheService.getScriptCache().put(
+            PUBLIC_CONFIG_CACHE_KEY,
+            snapshot,
+            PUBLIC_CONFIG_CACHE_SECONDS
+          );
+        } catch (err) {
+          console.warn('寫入公開設定快取失敗：' + err.message);
+        }
+        return persisted;
+      }
+    } catch (err) {
+      console.warn('讀取公開設定快照失敗：' + err.message);
+      props.deleteProperty(PUBLIC_CONFIG_PROPERTY_KEY);
+    }
+  }
 
   const db = getDb_();
   const activeContractors = readObjects_(db.getSheetByName('包商'))
@@ -934,11 +959,9 @@ function getPublicConfig_() {
     contractors: contractors
   };
   try {
-    CacheService.getScriptCache().put(
-      PUBLIC_CONFIG_CACHE_KEY,
-      JSON.stringify(result),
-      PUBLIC_CONFIG_CACHE_SECONDS
-    );
+    const serialized = JSON.stringify(result);
+    props.setProperty(PUBLIC_CONFIG_PROPERTY_KEY, serialized);
+    CacheService.getScriptCache().put(PUBLIC_CONFIG_CACHE_KEY, serialized, PUBLIC_CONFIG_CACHE_SECONDS);
   } catch (err) {
     console.warn('寫入公開設定快取失敗：' + err.message);
   }
