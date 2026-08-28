@@ -427,7 +427,69 @@ export async function syncActionResultToSupabase(action, result) {
     return { managers: 1 };
   }
 
+  if (action === 'adminArchiveContractor') {
+    const contractorId = requireText(result?.id, '承包商 ID', 100);
+    const now = new Date().toISOString();
+    const [contractorRows] = await Promise.all([
+      supabaseUpdate(
+        'contractors',
+        { id: `eq.${contractorId}`, status: 'eq.active' },
+        { status: 'archived', archived_at: now },
+      ),
+      supabaseUpdate(
+        'managers',
+        { contractor_id: `eq.${contractorId}`, status: 'eq.active' },
+        { status: 'disabled', session_version: randomUUID(), updated_at: now },
+      ),
+    ]);
+    return contractorRows.length ? { contractors: 1 } : { needsFullSync: true };
+  }
+
+  if (action === 'adminResetManagerPassword') {
+    const managerId = requireText(result?.id, '管理者 ID', 100);
+    const rows = await supabaseUpdate(
+      'managers',
+      { id: `eq.${managerId}` },
+      {
+        status: 'active',
+        must_change_password: true,
+        session_version: randomUUID(),
+        failed_attempts: 0,
+        locked_until: null,
+        updated_at: new Date().toISOString(),
+      },
+    );
+    return rows.length ? { managers: 1 } : { needsFullSync: true };
+  }
+
+  if (action === 'adminSetManagerStatus') {
+    const managerId = requireText(result?.id, '管理者 ID', 100);
+    const status = result?.status === 'active' ? 'active' : 'disabled';
+    const rows = await supabaseUpdate(
+      'managers',
+      { id: `eq.${managerId}` },
+      {
+        status,
+        session_version: randomUUID(),
+        failed_attempts: 0,
+        locked_until: null,
+        updated_at: new Date().toISOString(),
+      },
+    );
+    return rows.length ? { managers: 1 } : { needsFullSync: true };
+  }
+
   throw new UserInputError('不支援的 Supabase 鏡像操作');
+}
+
+export async function assertNoActiveWorkersInSupabase(contractorId) {
+  const id = requireText(contractorId, '承包商 ID', 100);
+  const rows = await supabaseSelect('workers', {
+    contractor_id: `eq.${id}`,
+    status: 'eq.active',
+    limit: '1',
+  });
+  if (rows.length) throw new UserInputError('此承包商仍有在冊人員，無法封存');
 }
 
 export class UserInputError extends Error {

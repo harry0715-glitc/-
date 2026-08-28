@@ -1407,10 +1407,12 @@ function WorkersTab({ data, showToast, adminCall, refresh }) {
                 isNew ? 'adminAddWorker' : 'adminUpdateWorker',
                 isNew ? payload : { ...payload, id: editing.id }
               );
-              await refresh();
               setEditing(null);
               setSelected(null);
               showToast(isNew ? '人員已新增' : '人員資料已更新');
+              void refresh().catch((error) => {
+                showToast(`清單更新失敗：${error.message}`, 'error');
+              });
             } catch (error) {
               showToast(`儲存失敗：${error.message}`, 'error');
             } finally {
@@ -1465,9 +1467,11 @@ function WorkersTab({ data, showToast, adminCall, refresh }) {
                     if (!confirm(`確定封存「${selected.name}」的人員資料？`)) return;
                     try {
                       await adminCall('adminDeleteWorker', { id: selected.id });
-                      await refresh();
                       setSelected(null);
                       showToast('人員資料已封存');
+                      void refresh().catch((error) => {
+                        showToast(`清單更新失敗：${error.message}`, 'error');
+                      });
                     } catch (error) {
                       showToast(`封存失敗：${error.message}`, 'error');
                     }
@@ -1585,8 +1589,10 @@ function ContractorsTab({ data, showToast, adminCall, refresh }) {
             setSavingPrimary(true);
             try {
               await adminCall('adminUpdatePrimaryContractor', { name: primaryName.trim() });
-              await refresh();
               showToast('主承包商公司名稱已更新');
+              void refresh().catch((error) => {
+                showToast(`清單更新失敗：${error.message}`, 'error');
+              });
             } catch (error) {
               showToast(`更新失敗：${error.message}`, 'error');
             } finally {
@@ -1621,9 +1627,11 @@ function ContractorsTab({ data, showToast, adminCall, refresh }) {
           setAdding(true);
           try {
             await adminCall('adminAddContractor', { name: name.trim() });
-            await refresh();
             setName('');
             showToast('次承包商已新增');
+            void refresh().catch((error) => {
+              showToast(`清單更新失敗：${error.message}`, 'error');
+            });
           } catch (error) {
             showToast(`新增失敗：${error.message}`, 'error');
           } finally {
@@ -1655,8 +1663,10 @@ function ContractorsTab({ data, showToast, adminCall, refresh }) {
                 if (!confirm(`確定封存「${contractor.name}」？`)) return;
                 try {
                   await adminCall('adminArchiveContractor', { id: contractor.id });
-                  await refresh();
                   showToast('次承包商已封存');
+                  void refresh().catch((error) => {
+                    showToast(`清單更新失敗：${error.message}`, 'error');
+                  });
                 } catch (error) {
                   showToast(`封存失敗：${error.message}`, 'error');
                 }
@@ -1729,7 +1739,6 @@ function ManagersTab({ data, showToast, adminCall, refresh }) {
           setCreating(true);
           try {
             await adminCall('adminCreateManager', form);
-            await refresh();
             setIssued({ email: form.email, password: form.temporaryPassword });
             setForm({
               displayName: '',
@@ -1738,6 +1747,9 @@ function ManagersTab({ data, showToast, adminCall, refresh }) {
               temporaryPassword: generateTemporaryPassword()
             });
             showToast('次管理者帳號已建立');
+            void refresh().catch((error) => {
+              showToast(`清單更新失敗：${error.message}`, 'error');
+            });
           } catch (error) {
             showToast(`建立失敗：${error.message}`, 'error');
           } finally {
@@ -1802,8 +1814,10 @@ function ManagersTab({ data, showToast, adminCall, refresh }) {
                     if (!confirm(`確定${nextStatus === 'active' ? '啟用' : '停用'}此帳號？`)) return;
                     try {
                       await adminCall('adminSetManagerStatus', { id: manager.id, status: nextStatus });
-                      await refresh();
                       showToast('帳號狀態已更新');
+                      void refresh().catch((error) => {
+                        showToast(`清單更新失敗：${error.message}`, 'error');
+                      });
                     } catch (error) {
                       showToast(`更新失敗：${error.message}`, 'error');
                     }
@@ -1821,9 +1835,11 @@ function ManagersTab({ data, showToast, adminCall, refresh }) {
                 adminCall={adminCall}
                 showToast={showToast}
                 onDone={async (password) => {
-                  await refresh();
                   setIssued({ email: manager.email, password });
                   setResetId('');
+                  void refresh().catch((error) => {
+                    showToast(`清單更新失敗：${error.message}`, 'error');
+                  });
                 }}
               />
             )}

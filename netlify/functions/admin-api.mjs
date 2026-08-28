@@ -8,6 +8,7 @@ import {
   getAdminDataFromSupabase,
   getManagerBySession,
   getWorkerPhotoFromSupabase,
+  assertNoActiveWorkersInSupabase,
   managerProfileFromSession,
   syncBundleToSupabase,
   syncActionResultToSupabase,
@@ -185,6 +186,14 @@ async function handler(event) {
     }
   }
 
+  if (request.action === "adminArchiveContractor" && supabaseActor) {
+    try {
+      await assertNoActiveWorkersInSupabase(payload.id);
+    } catch (error) {
+      return supabaseErrorResponse(error);
+    }
+  }
+
   if (request.action === "adminGetSession" && supabaseActor) {
     return jsonResponse(200, {
       ok: true,
@@ -270,13 +279,8 @@ async function handler(event) {
 
   if (isSupabaseConfigured() && SUPABASE_MIRROR_ACTIONS.has(request.action)) {
     try {
-      if (request.action === "adminAddContractor"
-        || request.action === "adminUpdatePrimaryContractor"
-        || request.action === "adminCreateManager") {
-        await syncActionResultToSupabase(request.action, upstreamBody.data);
-      } else {
-        await syncReferenceDataSnapshot(config, actorToken);
-      }
+      const mirrorResult = await syncActionResultToSupabase(request.action, upstreamBody.data);
+      if (mirrorResult?.needsFullSync) await syncReferenceDataSnapshot(config, actorToken);
     } catch (error) {
       console.warn(`Supabase 資料鏡像同步失敗：${error.message}`);
     }
