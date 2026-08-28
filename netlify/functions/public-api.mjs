@@ -5,6 +5,13 @@ const MAX_PHOTO_CHARACTERS = 8_100_000;
 const HTTP_PROTOCOLS = new Set(["http:", "https:"]);
 const ALLOWED_ACTIONS = new Set(["getPublicConfig", "submitRegistration"]);
 
+import { SupabaseError, isSupabaseEnabled } from "./supabase-client.mjs";
+import {
+  getPublicConfigFromSupabase,
+  submitRegistrationToSupabase,
+  UserInputError,
+} from "./supabase-service.mjs";
+
 export const config = {
   path: "/api/public",
   rateLimit: {
@@ -42,6 +49,27 @@ export default async function publicApi(request) {
   if (body.action === "submitRegistration"
     && (typeof payload.photo !== "string" || payload.photo.length > MAX_PHOTO_CHARACTERS)) {
     return jsonResponse(413, { ok: false, error: "照片為必填，且檔案不可過大" });
+  }
+
+  if (isSupabaseEnabled()) {
+    try {
+      const data = body.action === "getPublicConfig"
+        ? await getPublicConfigFromSupabase()
+        : await submitRegistrationToSupabase(payload);
+      const responseHeaders = body.action === "getPublicConfig"
+        ? {
+          "Cache-Control": "public, max-age=60, stale-while-revalidate=300",
+          Vary: "Origin"
+        }
+        : {};
+      return jsonResponse(200, { ok: true, data }, responseHeaders);
+    } catch (error) {
+      if (error instanceof UserInputError) {
+        return jsonResponse(400, { ok: false, error: safePublicError(error.message) });
+      }
+      const status = error instanceof SupabaseError && error.status === 504 ? 504 : 502;
+      return jsonResponse(status, { ok: false, error: "資料服務暫時無法連線" });
+    }
   }
 
   const appsScriptUrl = requiredEnv("APPS_SCRIPT_URL");

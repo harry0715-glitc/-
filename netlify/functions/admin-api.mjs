@@ -1,5 +1,20 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
 
+import { SupabaseError, isSupabaseConfigured, isSupabaseEnabled } from "./supabase-client.mjs";
+import {
+  createWorkerInSupabase,
+  deleteWorkerInSupabase,
+  generateReportFromSupabase,
+  getAdminDataFromSupabase,
+  getManagerBySession,
+  getWorkerPhotoFromSupabase,
+  managerProfileFromSession,
+  syncBundleToSupabase,
+  syncManagerFromLogin,
+  updateWorkerInSupabase,
+  UserInputError,
+} from "./supabase-service.mjs";
+
 const COOKIE_NAME = "__Host-wr_session";
 const SESSION_MAX_AGE_SECONDS = 8 * 60 * 60;
 const ACTOR_TOKEN_TTL_SECONDS = 5 * 60;
@@ -8,6 +23,22 @@ const REPORT_TIMEOUT_MS = 55_000;
 const GENERIC_ERROR = "Request failed";
 const HTTP_PROTOCOLS = new Set(["http:", "https:"]);
 const BASE64URL_PATTERN = /^[A-Za-z0-9_-]+$/;
+const SUPABASE_FAST_ACTIONS = new Set([
+  "adminGetData",
+  "adminAddWorker",
+  "adminUpdateWorker",
+  "adminDeleteWorker",
+  "adminGetPhoto",
+  "adminGenerateReport",
+]);
+const SUPABASE_MIRROR_ACTIONS = new Set([
+  "adminUpdatePrimaryContractor",
+  "adminAddContractor",
+  "adminArchiveContractor",
+  "adminCreateManager",
+  "adminResetManagerPassword",
+  "adminSetManagerStatus",
+]);
 
 export const config = {
   path: "/api/admin",
@@ -97,9 +128,18 @@ async function handler(event) {
       return errorResponse(502);
     }
 
+    const authenticated = authResponse(upstreamBody);
+    if (isSupabaseEnabled()) {
+      try {
+        await syncManagerFromLogin(authenticated.data.profile, identity.sessionVersion);
+      } catch (error) {
+        console.warn(`Supabase 管理者同步失敗：${error.message}`);
+      }
+    }
+
     return jsonResponse(
       200,
-      authResponse(upstreamBody),
+      authenticated,
       {
         "Set-Cookie": createSessionCookie(
           identity.managerId,
@@ -123,6 +163,71 @@ async function handler(event) {
     session.sessionVersion,
     config.gasAdminSecret
   );
+
+  let supabaseActor = null;
+  if (isSupabaseEnabled()) {
+    try {
+      supabaseActor = await getManagerBySession(session.managerId, session.sessionVersion);
+    } catch (error) {
+      console.warn(`Supabase 工作階段檢查失敗：${error.message}`);
+    }
+  }
+
+  if (request.action === "adminGetSession" && supabaseActor) {
+    return jsonResponse(200, {
+      ok: true,
+      data: { profile: managerProfileFromSession(supabaseActor) }
+    });
+  }
+
+  if (request.action === "adminSyncSupabase") {
+    if (!isSupabaseConfigured()) return errorResponse(500);
+    const migrationBody = await postJson(config.appsScriptUrl, {
+      action: "adminExportSupabaseData",
+      payload: {},
+      adminSecret: config.gasAdminSecret,
+      actorToken
+    }, UPSTREAM_TIMEOUT_MS);
+    if (!migrationBody || migrationBody.ok !== true) {
+      return errorResponse(migrationBody ? 400 : 502);
+    }
+    try {
+      const synced = await syncBundleToSupabase(migrationBody.data);
+      return jsonResponse(200, { ok: true, data: synced });
+    } catch (error) {
+      return supabaseErrorResponse(error);
+    }
+  }
+
+  if (supabaseActor && SUPABASE_FAST_ACTIONS.has(request.action)) {
+    try {
+      let result;
+      if (request.action === "adminGetData") {
+        result = await getAdminDataFromSupabase(supabaseActor);
+      } else if (request.action === "adminAddWorker") {
+        result = await createWorkerInSupabase(payload, supabaseActor, "manager");
+      } else if (request.action === "adminUpdateWorker") {
+        result = await updateWorkerInSupabase(payload, supabaseActor);
+      } else if (request.action === "adminDeleteWorker") {
+        result = await deleteWorkerInSupabase(payload, supabaseActor);
+      } else if (request.action === "adminGetPhoto") {
+        result = await getWorkerPhotoFromSupabase(payload, supabaseActor);
+        if (result.legacy) {
+          result = null;
+        }
+      } else if (request.action === "adminGenerateReport") {
+        result = await generateReportFromSupabase(payload, supabaseActor, async (action, gasPayload) => {
+          return callGasAction(config, action, gasPayload, actorToken, REPORT_TIMEOUT_MS);
+        });
+      }
+      if (result !== null && result !== undefined) {
+        return jsonResponse(200, { ok: true, data: result });
+      }
+    } catch (error) {
+      return supabaseErrorResponse(error);
+    }
+  }
+
   const upstreamBody = await postJson(config.appsScriptUrl, {
     action: request.action,
     payload,
@@ -141,10 +246,25 @@ async function handler(event) {
     return jsonResponse(unauthorized ? 401 : 400, { ok: false, error: message });
   }
 
+  if (isSupabaseConfigured() && SUPABASE_MIRROR_ACTIONS.has(request.action)) {
+    try {
+      await syncGasSnapshot(config, actorToken);
+    } catch (error) {
+      console.warn(`Supabase 資料鏡像同步失敗：${error.message}`);
+    }
+  }
+
   if (request.action === "adminChangePassword") {
     const identity = extractSessionIdentity(upstreamBody);
     if (!identity || identity.managerId !== session.managerId) {
       return errorResponse(502);
+    }
+    if (isSupabaseEnabled()) {
+      try {
+        await syncManagerFromLogin(authResponse(upstreamBody).data.profile, identity.sessionVersion);
+      } catch (error) {
+        console.warn(`Supabase 管理者同步失敗：${error.message}`);
+      }
     }
     return jsonResponse(
       200,
@@ -272,9 +392,52 @@ function extractSessionIdentity(responseBody) {
 }
 
 function authResponse(upstreamBody) {
-  const data = isRecord(upstreamBody.data) ? upstreamBody.data : {};
-  const profile = isRecord(data.profile) ? data.profile : {};
+  const profile = extractProfile(upstreamBody);
   return { ok: true, data: { profile } };
+}
+
+function extractProfile(upstreamBody) {
+  const data = isRecord(upstreamBody.data) ? upstreamBody.data : {};
+  return isRecord(data.profile) ? data.profile : {};
+}
+
+async function callGasAction(config, action, payload, actorToken, timeoutMs) {
+  const upstreamBody = await postJson(config.appsScriptUrl, {
+    action,
+    payload,
+    adminSecret: config.gasAdminSecret,
+    actorToken
+  }, timeoutMs);
+  if (!upstreamBody) throw new SupabaseError("Google 文件服務暫時無法連線", 502, "GAS_UNAVAILABLE");
+  if (upstreamBody.ok !== true) {
+    throw new UserInputError(
+      typeof upstreamBody.error === "string" ? upstreamBody.error.slice(0, 240) : "報表產生失敗"
+    );
+  }
+  return upstreamBody.data;
+}
+
+async function syncGasSnapshot(config, actorToken) {
+  const migrationBody = await postJson(config.appsScriptUrl, {
+    action: "adminExportSupabaseData",
+    payload: {},
+    adminSecret: config.gasAdminSecret,
+    actorToken
+  }, UPSTREAM_TIMEOUT_MS);
+  if (!migrationBody || migrationBody.ok !== true) {
+    throw new Error("Google 資料同步來源無法取得");
+  }
+  return syncBundleToSupabase(migrationBody.data);
+}
+
+function supabaseErrorResponse(error) {
+  if (error instanceof UserInputError) {
+    return jsonResponse(400, { ok: false, error: error.message });
+  }
+  if (error instanceof SupabaseError && error.status === 401) {
+    return errorResponse(401);
+  }
+  return errorResponse(502);
 }
 
 function createSessionCookie(managerId, sessionVersion, sessionSecret) {

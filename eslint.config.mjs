@@ -8,6 +8,7 @@ const appsScriptGlobals = {
   DriveApp: 'readonly',
   PropertiesService: 'readonly',
   SpreadsheetApp: 'readonly',
+  UrlFetchApp: 'readonly',
   Utilities: 'readonly',
 };
 

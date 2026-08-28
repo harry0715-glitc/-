@@ -2027,6 +2027,8 @@ function SettingsTab({ data, setData, showToast, adminCall, onLogout }) {
   const owner = data.profile.role === 'owner';
   const [backupLoading, setBackupLoading] = useState(false);
   const [backup, setBackup] = useState(null);
+  const [migrationLoading, setMigrationLoading] = useState(false);
+  const [migration, setMigration] = useState(null);
   return (
     <div>
       <div className="mb-5">
@@ -2044,35 +2046,70 @@ function SettingsTab({ data, setData, showToast, adminCall, onLogout }) {
         />
         <div className="space-y-4">
           {owner && (
-            <section className="rounded-lg border border-zinc-800 p-4">
-              <div className="flex items-center gap-3">
-                <DatabaseBackup className="h-5 w-5 text-emerald-400" />
-                <div>
-                  <h3 className="font-bold text-white">資料備份</h3>
-                  <p className="mt-1 text-xs text-zinc-500">建立目前資料庫快照</p>
+            <>
+              <section className="rounded-lg border border-cyan-900/70 p-4">
+                <div className="flex items-center gap-3">
+                  <DatabaseBackup className="h-5 w-5 text-cyan-400" />
+                  <div>
+                    <h3 className="font-bold text-white">Supabase 資料搬移</h3>
+                    <p className="mt-1 text-xs text-zinc-500">複製現有名冊資料，完成後再切換資料來源</p>
+                  </div>
                 </div>
-              </div>
-              <button
-                onClick={async () => {
-                  setBackupLoading(true);
-                  try {
-                    const result = await adminCall('adminCreateBackup');
-                    setBackup(result);
-                    showToast('備份已建立');
-                  } catch (error) {
-                    showToast(`備份失敗：${error.message}`, 'error');
-                  } finally {
-                    setBackupLoading(false);
-                  }
-                }}
-                disabled={backupLoading}
-                className="mt-4 flex w-full items-center justify-center gap-2 rounded-lg border border-emerald-800 px-4 py-3 font-bold text-emerald-400 disabled:text-zinc-600"
-              >
-                {backupLoading ? <LoaderCircle className="h-5 w-5 animate-spin" /> : <DatabaseBackup className="h-5 w-5" />}
-                立即備份
-              </button>
-              {backup && <a href={backup.url} target="_blank" rel="noreferrer" className="mt-3 block truncate text-center text-xs text-emerald-400">{backup.name}</a>}
-            </section>
+                <button
+                  onClick={async () => {
+                    setMigrationLoading(true);
+                    try {
+                      const result = await adminCall('adminSyncSupabase');
+                      setMigration(result);
+                      showToast(`已同步 ${result.workers} 位人員`);
+                    } catch (error) {
+                      showToast(`搬移失敗：${error.message}`, 'error');
+                    } finally {
+                      setMigrationLoading(false);
+                    }
+                  }}
+                  disabled={migrationLoading}
+                  className="mt-4 flex w-full items-center justify-center gap-2 rounded-lg border border-cyan-800 px-4 py-3 font-bold text-cyan-400 disabled:text-zinc-600"
+                >
+                  {migrationLoading ? <LoaderCircle className="h-5 w-5 animate-spin" /> : <DatabaseBackup className="h-5 w-5" />}
+                  同步現有資料
+                </button>
+                {migration && (
+                  <p className="mt-3 text-center text-xs text-zinc-500">
+                    承包商 {migration.contractors} 家 · 人員 {migration.workers} 位 · 管理者 {migration.managers} 位
+                  </p>
+                )}
+              </section>
+              <section className="rounded-lg border border-zinc-800 p-4">
+                <div className="flex items-center gap-3">
+                  <DatabaseBackup className="h-5 w-5 text-emerald-400" />
+                  <div>
+                    <h3 className="font-bold text-white">資料備份</h3>
+                    <p className="mt-1 text-xs text-zinc-500">建立目前資料庫快照</p>
+                  </div>
+                </div>
+                <button
+                  onClick={async () => {
+                    setBackupLoading(true);
+                    try {
+                      const result = await adminCall('adminCreateBackup');
+                      setBackup(result);
+                      showToast('備份已建立');
+                    } catch (error) {
+                      showToast(`備份失敗：${error.message}`, 'error');
+                    } finally {
+                      setBackupLoading(false);
+                    }
+                  }}
+                  disabled={backupLoading}
+                  className="mt-4 flex w-full items-center justify-center gap-2 rounded-lg border border-emerald-800 px-4 py-3 font-bold text-emerald-400 disabled:text-zinc-600"
+                >
+                  {backupLoading ? <LoaderCircle className="h-5 w-5 animate-spin" /> : <DatabaseBackup className="h-5 w-5" />}
+                  立即備份
+                </button>
+                {backup && <a href={backup.url} target="_blank" rel="noreferrer" className="mt-3 block truncate text-center text-xs text-emerald-400">{backup.name}</a>}
+              </section>
+            </>
           )}
           <section className="rounded-lg border border-zinc-800 p-4">
             <div className="flex items-center gap-3">

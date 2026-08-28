@@ -82,6 +82,10 @@ function dispatch_(action, payload, publicSecret, adminSecret, actorToken) {
 
   const actor = requireActor_(actorToken);
   if (action === 'adminGetSession') return { profile: managerProfile_(actor) };
+  if (action === 'adminExportSupabaseData') {
+    requireOwner_(actor);
+    return exportSupabaseDataAdmin_(actor);
+  }
   if (action === 'adminChangePassword') return changePasswordAdmin_(payload, actor);
   if (actor.mustChangePassword === 'true') throw new Error('請先更換臨時密碼');
 
@@ -92,6 +96,7 @@ function dispatch_(action, payload, publicSecret, adminSecret, actorToken) {
     case 'adminDeleteWorker': return softDeleteWorkerAdmin_(payload, actor);
     case 'adminGetPhoto': return getPhotoAdmin_(payload, actor);
     case 'adminGenerateReport': return generateReportAdmin_(payload, actor);
+    case 'adminGenerateReportFromPayload': return generateReportFromPayloadAdmin_(payload, actor);
     case 'adminUpdatePrimaryContractor':
       requireOwner_(actor);
       return updatePrimaryContractorAdmin_(payload, actor);
@@ -1007,6 +1012,71 @@ function getAdminData_(actor) {
   };
 }
 
+// 只供主要管理者透過 Netlify 進行一次性資料搬移；不回傳密碼雜湊或任何 Script Properties。
+function exportSupabaseDataAdmin_(actor) {
+  const db = getDb_();
+  const contractors = readObjects_(db.getSheetByName('包商')).map(item => ({
+    id: item.id,
+    name: item.name,
+    companyType: contractorType_(item),
+    status: item.status || 'active',
+    createdAt: item.createdAt || '',
+    archivedAt: item.archivedAt || ''
+  }));
+  const workers = readObjects_(db.getSheetByName('人員')).map(item => ({
+    id: item.id,
+    name: item.name,
+    idNumber: item.idNumber,
+    phone: item.phone,
+    emergencyContact: item.emergencyContact,
+    emergencyPhone: item.emergencyPhone,
+    bloodType: item.bloodType,
+    jobTitle: item.jobTitle,
+    contractorId: item.contractorId,
+    contractorName: item.contractorName,
+    entryDate: item.entryDate,
+    notes: item.notes || '',
+    photoFileId: item.photoFileId || extractDriveFileId_(item.photoUrl),
+    createdAt: item.createdAt || '',
+    status: item.status || 'active',
+    deletedAt: item.deletedAt || '',
+    updatedAt: item.updatedAt || item.createdAt || '',
+    submissionId: item.submissionId || item.id,
+    consentedAt: item.consentedAt || item.createdAt || '',
+    source: item.source || 'legacy',
+    createdById: item.createdById || '',
+    createdByName: item.createdByName || ''
+  }));
+  const managers = readObjects_(db.getSheetByName('管理者'))
+    .filter(item => item.role === 'owner' || item.role === 'contractor')
+    .map(item => ({
+      id: item.id,
+      username: item.username,
+      displayName: item.displayName,
+      email: item.email,
+      role: item.role,
+      contractorId: item.contractorId || '',
+      contractorName: item.contractorName || '',
+      status: item.status || 'active',
+      mustChangePassword: item.mustChangePassword === 'true',
+      sessionVersion: item.sessionVersion || '',
+      failedAttempts: item.failedAttempts || '0',
+      lockedUntil: item.lockedUntil || '',
+      createdAt: item.createdAt || '',
+      updatedAt: item.updatedAt || '',
+      lastLoginAt: item.lastLoginAt || ''
+    }));
+  const primary = getPrimaryContractor_(db, contractors);
+  writeAudit_(actor, 'export', 'supabase', '', 'contractors=' + contractors.length + ':workers=' + workers.length);
+  return {
+    schemaVersion: SCHEMA_VERSION,
+    primaryContractor: primary ? contractorSummary_(primary) : null,
+    contractors: contractors,
+    workers: workers,
+    managers: managers
+  };
+}
+
 function sanitizeWorker_(worker, contractorMap) {
   const contractor = contractorMap && contractorMap[worker.contractorId];
   return {
@@ -1204,6 +1274,111 @@ function getPhotoAdmin_(input, actor) {
   return {
     dataUrl: 'data:' + blob.getContentType() + ';base64,' + Utilities.base64Encode(blob.getBytes())
   };
+}
+
+// Supabase 模式只把已完成權限檢查的資料交給 Apps Script 排版，不再重新掃描 Google Sheet。
+function generateReportFromPayloadAdmin_(input, actor) {
+  const type = String(input.type || '');
+  if (type !== 'daily' && type !== 'company') throw new Error('報表類型不正確');
+  const primaryInput = input.primaryContractor || {};
+  const primaryName = requireText_(primaryInput.name, '主承包商公司名稱', 100);
+  const primary = {
+    id: String(primaryInput.id || ''),
+    name: primaryName,
+    companyType: CONTRACTOR_TYPE_PRIMARY
+  };
+  const contractorInput = input.contractor || null;
+  const contractorId = type === 'company'
+    ? (actor.role === 'contractor' ? actor.contractorId : requireText_(input.contractorId, '承包商', 100))
+    : '';
+  if (type === 'company' && (!contractorInput || String(contractorInput.id || '') !== contractorId)) {
+    throw new Error('報表承包商資料不正確');
+  }
+  if (type === 'company' && actor.role === 'contractor' && contractorId !== actor.contractorId) {
+    throw new Error('無權產生其他承包商的報表');
+  }
+
+  const payloadWorkers = Array.isArray(input.workers) ? input.workers : [];
+  const workers = payloadWorkers.map(worker => {
+    const workerContractorId = requireText_(worker.contractorId, '人員所屬承包商', 100);
+    if (actor.role === 'contractor' && workerContractorId !== actor.contractorId) {
+      throw new Error('報表含有未授權的人員資料');
+    }
+    if (type === 'company' && workerContractorId !== contractorId) {
+      throw new Error('報表含有不屬於所選承包商的人員資料');
+    }
+    return {
+      id: String(worker.id || ''),
+      name: String(worker.name || ''),
+      idNumber: String(worker.idNumber || ''),
+      phone: String(worker.phone || ''),
+      emergencyContact: String(worker.emergencyContact || ''),
+      emergencyPhone: String(worker.emergencyPhone || ''),
+      bloodType: String(worker.bloodType || ''),
+      jobTitle: String(worker.jobTitle || ''),
+      contractorId: workerContractorId,
+      contractorName: String(worker.contractorName || ''),
+      companyType: worker.companyType === CONTRACTOR_TYPE_PRIMARY
+        ? CONTRACTOR_TYPE_PRIMARY
+        : CONTRACTOR_TYPE_SUBCONTRACTOR,
+      entryDate: String(worker.entryDate || ''),
+      notes: String(worker.notes || ''),
+      createdAt: String(worker.createdAt || ''),
+      updatedAt: String(worker.updatedAt || ''),
+      photoFileId: String(worker.photoFileId || ''),
+      photoSignedUrl: validSupabasePhotoUrl_(worker.photoSignedUrl) ? worker.photoSignedUrl : ''
+    };
+  });
+
+  let reportName = '';
+  let scopeLabel = '';
+  let dataBasis = '';
+  let filenameLabel = '';
+  if (type === 'daily') {
+    const date = requireDate_(input.date, '報表日期');
+    reportName = '每日新增人員名冊';
+    scopeLabel = actor.role === 'contractor'
+      ? '次承包商：' + actor.contractorName
+      : '全部公司（含主承包商與次承包商）';
+    dataBasis = '登記日期：' + date;
+    filenameLabel = '每日新增_' + date;
+    if (actor.role === 'contractor') filenameLabel += '_' + actor.contractorName;
+  } else {
+    reportName = '公司完整人員名冊';
+    scopeLabel = contractorInput.companyType === CONTRACTOR_TYPE_PRIMARY
+      ? '主承包商自有人員：' + contractorInput.name
+      : '次承包商人員：' + contractorInput.name;
+    dataBasis = '資料截至：' + Utilities.formatDate(
+      new Date(),
+      Session.getScriptTimeZone(),
+      'yyyy/MM/dd HH:mm:ss'
+    );
+    filenameLabel = '公司完整名冊_' + contractorInput.name;
+  }
+
+  workers.sort((a, b) =>
+    (a.companyType === CONTRACTOR_TYPE_PRIMARY ? 0 : 1) -
+      (b.companyType === CONTRACTOR_TYPE_PRIMARY ? 0 : 1) ||
+    String(a.contractorName).localeCompare(String(b.contractorName), 'zh-Hant') ||
+    String(a.name).localeCompare(String(b.name), 'zh-Hant')
+  );
+  const ownerEmail = PropertiesService.getScriptProperties().getProperty('ADMIN_EMAIL') || '';
+  const viewers = [ownerEmail, actor.email].filter((value, index, list) =>
+    value && list.indexOf(value) === index
+  );
+  return createRosterPdf_({
+    primaryContractorId: primary.id,
+    primaryContractorName: primary.name,
+    reportName: reportName,
+    scopeLabel: scopeLabel,
+    dataBasis: dataBasis,
+    filenameLabel: filenameLabel
+  }, workers, viewers);
+}
+
+function validSupabasePhotoUrl_(value) {
+  const url = String(value || '');
+  return /^https:\/\/[^\s/]+\.supabase\.co\/storage\/v1\/object\/sign\/worker-photos\//i.test(url);
 }
 
 function requireText_(value, label, maxLength) {
@@ -1609,12 +1784,31 @@ function appendWorkerToDocument_(body, worker, index) {
     .setVerticalAlignment(DocumentApp.VerticalAlignment.TOP);
 
   const photoId = worker.photoFileId || extractDriveFileId_(worker.photoUrl);
-  if (photoId) {
+  let photoBlob = null;
+  if (worker.photoSignedUrl) {
     try {
-      photoCell.appendImage(DriveApp.getFileById(photoId).getBlob()).setWidth(98).setHeight(126);
+      const response = UrlFetchApp.fetch(worker.photoSignedUrl, { muteHttpExceptions: true });
+      if (response.getResponseCode() >= 200 && response.getResponseCode() < 300) {
+        const candidate = response.getBlob();
+        if (/^image\/(jpeg|jpg|png)$/i.test(candidate.getContentType()) && candidate.getBytes().length <= 2500000) {
+          photoBlob = candidate;
+        }
+      }
     } catch (err) {
-      photoCell.appendParagraph('照片無法讀取');
+      console.warn('Supabase 照片讀取失敗：' + err.message);
     }
+  }
+  if (!photoBlob && photoId) {
+    try {
+      photoBlob = DriveApp.getFileById(photoId).getBlob();
+    } catch (err) {
+      console.warn('Drive 照片讀取失敗：' + err.message);
+    }
+  }
+  if (photoBlob) {
+    photoCell.appendImage(photoBlob).setWidth(98).setHeight(126);
+  } else if (photoId || worker.photoSignedUrl) {
+    photoCell.appendParagraph('照片無法讀取');
   } else {
     photoCell.appendParagraph('未附照片');
   }
