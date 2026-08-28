@@ -4,17 +4,23 @@ import {
   SupabaseError,
   isSupabaseConfigured,
   supabaseCreateSignedPhotoUrl,
+  supabaseCreateSignedObjectUrl,
   supabaseDeletePhoto,
   supabaseDownloadPhoto,
+  supabaseEnsurePrivateBucket,
   supabaseInsert,
   supabaseSelect,
   supabaseUpdate,
+  supabaseUploadObject,
   supabaseUploadPhoto,
   supabaseUpsert,
 } from './supabase-client.mjs';
 
 const MAX_PHOTO_CHARACTERS = 8_100_000;
 const MAX_PREVIEW_BYTES = 2_500_000;
+const BACKUP_BUCKET = 'registry-backups';
+const MAX_BACKUP_BYTES = 25_000_000;
+const BACKUP_LINK_TTL_SECONDS = 10 * 60;
 const TAIWAN_ID_AREA_CODES = {
   A: 10, B: 11, C: 12, D: 13, E: 14, F: 15, G: 16, H: 17,
   I: 34, J: 18, K: 19, L: 20, M: 21, N: 22, O: 35, P: 23,
@@ -44,6 +50,7 @@ export async function submitRegistrationToSupabase(input) {
 
 export async function getManagerBySession(managerId, sessionVersion) {
   const rows = await supabaseSelect('managers', {
+    select: 'id,username,display_name,email,role,contractor_id,contractor_name,status,must_change_password,session_version',
     id: `eq.${managerId}`,
     session_version: `eq.${sessionVersion}`,
     status: 'eq.active',
@@ -81,12 +88,17 @@ export async function getAdminDataFromSupabase(actor) {
   if (!owner) workerParams.contractor_id = `eq.${actor.contractorId}`;
   const [contractorRows, workerRows, managerRows] = await Promise.all([
     supabaseSelect('contractors', {
+      select: 'id,name,company_type,status,created_at',
       status: 'eq.active',
       order: 'company_type.asc,name.asc',
     }),
-    supabaseSelect('workers', workerParams),
+    supabaseSelect('workers', {
+      select: 'id,name,id_number,phone,emergency_contact,emergency_phone,blood_type,job_title,contractor_id,contractor_name,entry_date,notes,photo_storage_path,photo_file_id,created_at,updated_at',
+      ...workerParams,
+    }),
     owner
       ? supabaseSelect('managers', {
+        select: 'id,display_name,email,role,contractor_id,contractor_name,status,must_change_password,created_at,last_login_at',
         role: 'eq.contractor',
         order: 'created_at.desc',
       })
@@ -116,6 +128,68 @@ export async function getAdminDataFromSupabase(actor) {
   };
 }
 
+export async function createSupabaseBackup(actor) {
+  if (actor?.role !== 'owner') throw new UserInputError('僅主要管理者可建立備份');
+
+  const [contractors, workers, managers, auditLogs] = await Promise.all([
+    supabaseSelect('contractors', {
+      select: 'id,name,company_type,status,created_at,archived_at',
+      order: 'created_at.asc',
+    }),
+    supabaseSelect('workers', {
+      select: 'id,name,id_number,phone,emergency_contact,emergency_phone,blood_type,job_title,contractor_id,contractor_name,entry_date,notes,photo_storage_path,photo_file_id,created_at,status,deleted_at,updated_at,submission_id,consented_at,source,created_by_id,created_by_name',
+      order: 'created_at.asc',
+    }),
+    supabaseSelect('managers', {
+      select: 'id,username,display_name,email,role,contractor_id,contractor_name,status,must_change_password,created_at,updated_at,last_login_at',
+      order: 'created_at.asc',
+    }),
+    supabaseSelect('audit_logs', {
+      select: 'id,timestamp,actor_id,actor_role,actor_contractor_id,action,target_type,target_id,details',
+      order: 'timestamp.asc',
+    }),
+  ]);
+
+  const generatedAt = new Date().toISOString();
+  const snapshot = {
+    format: '施工人員名冊 Supabase 快照 v1',
+    generatedAt,
+    source: 'supabase',
+    note: '管理者密碼雜湊未放入快照；照片以 photo_storage_path 對應私有 worker-photos 儲存空間。',
+    contractors,
+    workers,
+    managers,
+    auditLogs,
+  };
+  const serialized = JSON.stringify(snapshot);
+  const bytes = Buffer.from(serialized, 'utf8');
+  if (bytes.length > MAX_BACKUP_BYTES) {
+    throw new UserInputError('目前資料量超過單一備份檔限制，請改用分批備份');
+  }
+
+  await supabaseEnsurePrivateBucket(BACKUP_BUCKET, {
+    fileSizeLimit: MAX_BACKUP_BYTES,
+    allowedMimeTypes: ['application/json'],
+  });
+  const stamp = generatedAt.replace(/[-:TZ.]/g, '').slice(0, 14);
+  const path = `snapshots/${stamp}_${randomUUID()}.json`;
+  await supabaseUploadObject(BACKUP_BUCKET, path, bytes, 'application/json; charset=utf-8');
+  const url = await supabaseCreateSignedObjectUrl(BACKUP_BUCKET, path, BACKUP_LINK_TTL_SECONDS);
+  return {
+    fileId: path,
+    name: `施工人員名冊_Supabase快照_${stamp}.json`,
+    url,
+    expiresAt: new Date(Date.now() + BACKUP_LINK_TTL_SECONDS * 1000).toISOString(),
+    source: 'supabase',
+    counts: {
+      contractors: contractors.length,
+      workers: workers.length,
+      managers: managers.length,
+      auditLogs: auditLogs.length,
+    },
+  };
+}
+
 export async function createWorkerInSupabase(input, actor, source) {
   const contractorId = actor?.role === 'contractor'
     ? actor.contractorId
@@ -125,6 +199,7 @@ export async function createWorkerInSupabase(input, actor, source) {
   const [contractor, existingSubmissionRows] = await Promise.all([
     getActiveContractor(contractorId),
     supabaseSelect('workers', {
+      select: 'id',
       submission_id: `eq.${submissionId}`,
       limit: '1',
     }),
@@ -151,7 +226,7 @@ export async function createWorkerInSupabase(input, actor, source) {
       now,
       photoStoragePath: photoPath,
       actor,
-    }));
+    }), { returnRepresentation: false });
   } catch (error) {
     if (photoUploaded) {
       try { await supabaseDeletePhoto(photoPath); } catch (cleanupError) { console.warn(cleanupError.message); }
@@ -166,6 +241,7 @@ export async function createWorkerInSupabase(input, actor, source) {
 export async function updateWorkerInSupabase(input, actor) {
   const id = requireText(input.id, '人員 ID', 100);
   const existingRows = await supabaseSelect('workers', {
+    select: 'id,contractor_id,contractor_name,source,submission_id,photo_storage_path,photo_file_id,consented_at,created_at,created_by_id,created_by_name',
     id: `eq.${id}`,
     status: 'eq.active',
     limit: '1',
@@ -177,10 +253,12 @@ export async function updateWorkerInSupabase(input, actor) {
   const contractorId = actor.role === 'contractor'
     ? actor.contractorId
     : requireText(input.contractorId, '所屬承包商', 100);
-  const contractor = await getActiveContractor(contractorId);
-  if (!contractor) throw new UserInputError('所選承包商不存在或已停用');
   const normalized = validateWorkerInput(input, false);
-  const duplicateCheck = assertNoDuplicateWorker(normalized, contractor.id, id);
+  const [contractor, duplicateCheck] = await Promise.all([
+    getActiveContractor(contractorId),
+    assertNoDuplicateWorker(normalized, contractorId, id),
+  ]);
+  if (!contractor) throw new UserInputError('所選承包商不存在或已停用');
 
   const now = new Date().toISOString();
   let newPhotoPath = '';
@@ -226,20 +304,18 @@ export async function updateWorkerInSupabase(input, actor) {
 
 export async function deleteWorkerInSupabase(input, actor) {
   const id = requireText(input.id, '人員 ID', 100);
-  const rows = await supabaseSelect('workers', {
+  const filters = {
     id: `eq.${id}`,
     status: 'eq.active',
-    limit: '1',
+  };
+  if (actor.role === 'contractor') filters.contractor_id = `eq.${actor.contractorId}`;
+  const rows = await supabaseUpdate('workers', filters, {
+    status: 'deleted',
+    deleted_at: new Date().toISOString(),
+    updated_at: new Date().toISOString(),
   });
   const worker = rows[0];
-  if (!worker) throw new UserInputError('找不到人員資料');
-  assertWorkerAccess(worker, actor);
-  const now = new Date().toISOString();
-  await supabaseUpdate('workers', { id: `eq.${id}` }, {
-    status: 'deleted',
-    deleted_at: now,
-    updated_at: now,
-  });
+  if (!worker) throw new UserInputError('找不到人員資料或無權存取');
   await writeAudit(actor, 'archive', 'worker', id, worker.contractor_name);
   return { id };
 }
@@ -247,6 +323,7 @@ export async function deleteWorkerInSupabase(input, actor) {
 export async function getWorkerPhotoFromSupabase(input, actor) {
   const id = requireText(input.id, '人員 ID', 100);
   const rows = await supabaseSelect('workers', {
+    select: 'id,contractor_id,photo_storage_path,photo_file_id',
     id: `eq.${id}`,
     status: 'eq.active',
     limit: '1',
@@ -269,17 +346,23 @@ export async function generateReportFromSupabase(input, actor, callGas) {
   const type = String(input.type || '');
   if (type !== 'daily' && type !== 'company') throw new UserInputError('報表類型不正確');
   const date = type === 'daily' ? requireDate(input.date, '報表日期') : '';
-  const contractorRows = await supabaseSelect('contractors', {
-    status: 'eq.active',
-    order: 'company_type.asc,name.asc',
-  });
+  const workerParams = { status: 'eq.active', order: 'created_at.desc' };
+  if (actor.role === 'contractor') workerParams.contractor_id = `eq.${actor.contractorId}`;
+  const [contractorRows, workerRows] = await Promise.all([
+    supabaseSelect('contractors', {
+      select: 'id,name,company_type,status,created_at',
+      status: 'eq.active',
+      order: 'company_type.asc,name.asc',
+    }),
+    supabaseSelect('workers', {
+      select: 'id,name,id_number,phone,emergency_contact,emergency_phone,blood_type,job_title,contractor_id,contractor_name,entry_date,notes,photo_storage_path,photo_file_id,created_at,updated_at',
+      ...workerParams,
+    }),
+  ]);
   const contractors = contractorRows.map(contractorSummaryFromRow).sort(compareContractors);
   const primaryContractor = contractors.find((item) => item.companyType === 'primary') || null;
   if (!primaryContractor) throw new UserInputError('請先設定主承包商公司名稱');
 
-  const workerParams = { status: 'eq.active', order: 'created_at.desc' };
-  if (actor.role === 'contractor') workerParams.contractor_id = `eq.${actor.contractorId}`;
-  const workerRows = await supabaseSelect('workers', workerParams);
   let workers = workerRows.map((row) => workerForReport(row, contractors));
   let selectedContractor = null;
   if (type === 'daily') {
@@ -390,6 +473,7 @@ export async function syncActionResultToSupabase(action, result) {
 
     if (action === 'adminUpdatePrimaryContractor') {
       const previousPrimaryRows = await supabaseSelect('contractors', {
+        select: 'id',
         company_type: 'eq.primary',
         status: 'eq.active',
       });
@@ -401,17 +485,20 @@ export async function syncActionResultToSupabase(action, result) {
             'contractors',
             { id: `eq.${row.id}` },
             { company_type: 'subcontractor' },
+            { returnRepresentation: false },
           )),
         supabaseUpsert('contractors', contractor),
         supabaseUpdate(
           'workers',
           { contractor_id: `eq.${contractor.id}`, status: 'eq.active' },
           { contractor_name: contractor.name, updated_at: now },
+          { returnRepresentation: false },
         ),
         supabaseUpdate(
           'managers',
           { contractor_id: `eq.${contractor.id}`, status: 'eq.active' },
           { status: 'disabled', session_version: randomUUID(), updated_at: now },
+          { returnRepresentation: false },
         ),
       ]);
     } else {
@@ -440,6 +527,7 @@ export async function syncActionResultToSupabase(action, result) {
         'managers',
         { contractor_id: `eq.${contractorId}`, status: 'eq.active' },
         { status: 'disabled', session_version: randomUUID(), updated_at: now },
+        { returnRepresentation: false },
       ),
     ]);
     return contractorRows.length ? { contractors: 1 } : { needsFullSync: true };
@@ -502,6 +590,7 @@ export class UserInputError extends Error {
 
 async function getActiveContractor(id) {
   const rows = await supabaseSelect('contractors', {
+    select: 'id,name,company_type,status',
     id: `eq.${id}`,
     status: 'eq.active',
     limit: '1',
@@ -512,11 +601,13 @@ async function getActiveContractor(id) {
 async function assertNoDuplicateWorker(input, contractorId, excludedId = '') {
   const [idRows, profileRows] = await Promise.all([
     supabaseSelect('workers', {
+      select: 'id',
       id_number: `eq.${input.idNumber}`,
       status: 'eq.active',
       limit: '1',
     }),
     supabaseSelect('workers', {
+      select: 'id,name,phone',
       contractor_id: `eq.${contractorId}`,
       status: 'eq.active',
     }),
@@ -870,7 +961,7 @@ async function writeAudit(actor, action, targetType, targetId, details) {
       target_type: targetType,
       target_id: targetId,
       details: details || '',
-    });
+    }, { returnRepresentation: false, timeoutMs: 2500 });
   } catch (error) {
     console.warn(`Supabase 稽核紀錄寫入失敗：${error.message}`);
   }

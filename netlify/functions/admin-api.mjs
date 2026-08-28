@@ -3,6 +3,7 @@ import { createHmac, timingSafeEqual } from "node:crypto";
 import { SupabaseError, isSupabaseConfigured, isSupabaseEnabled } from "./supabase-client.mjs";
 import {
   createWorkerInSupabase,
+  createSupabaseBackup,
   deleteWorkerInSupabase,
   generateReportFromSupabase,
   getAdminDataFromSupabase,
@@ -33,6 +34,7 @@ const SUPABASE_FAST_ACTIONS = new Set([
   "adminDeleteWorker",
   "adminGetPhoto",
   "adminGenerateReport",
+  "adminCreateBackup",
 ]);
 const SUPABASE_MIRROR_ACTIONS = new Set([
   "adminUpdatePrimaryContractor",
@@ -250,6 +252,8 @@ async function handler(event) {
         result = await generateReportFromSupabase(payload, supabaseActor, async (action, gasPayload) => {
           return callGasAction(config, action, gasPayload, actorToken, REPORT_TIMEOUT_MS);
         });
+      } else if (request.action === "adminCreateBackup") {
+        result = await createSupabaseBackup(supabaseActor);
       }
       if (result !== null && result !== undefined) {
         return jsonResponse(200, { ok: true, data: result });
@@ -261,7 +265,7 @@ async function handler(event) {
 
   const upstreamBody = await postJson(config.appsScriptUrl, {
     action: request.action,
-    payload,
+    payload: prepareUpstreamPayload(request.action, payload),
     adminSecret: config.gasAdminSecret,
     actorToken
   }, request.action === "adminGenerateReport" ? REPORT_TIMEOUT_MS : UPSTREAM_TIMEOUT_MS);
@@ -487,6 +491,21 @@ async function syncReferenceDataSnapshot(config, actorToken) {
     ...migrationBody.data,
     workers: [],
   });
+}
+
+function prepareUpstreamPayload(action, payload) {
+  if (!isSupabaseEnabled() || !SUPABASE_MIRROR_ACTIONS.has(action)) return payload;
+  const next = { ...payload };
+  if (action === "adminAddContractor" || action === "adminUpdatePrimaryContractor") {
+    next.skipDriveFolder = true;
+  }
+  if (action === "adminUpdatePrimaryContractor") {
+    next.skipLegacyWorkerSync = true;
+  }
+  if (action === "adminArchiveContractor") {
+    next.skipLegacyWorkerCheck = true;
+  }
+  return next;
 }
 
 function supabaseErrorResponse(error) {

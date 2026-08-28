@@ -2041,6 +2041,7 @@ function PasswordPanel({ required = false, profile, adminCall, showToast, onChan
 
 function SettingsTab({ data, setData, showToast, adminCall, onLogout }) {
   const owner = data.profile.role === 'owner';
+  const usesSupabase = data.dataSource === 'supabase';
   const [backupLoading, setBackupLoading] = useState(false);
   const [backup, setBackup] = useState(null);
   return (
@@ -2080,8 +2081,10 @@ function SettingsTab({ data, setData, showToast, adminCall, onLogout }) {
                 <div className="flex items-center gap-3">
                   <DatabaseBackup className="h-5 w-5 text-emerald-400" />
                   <div>
-                    <h3 className="font-bold text-white">資料備份</h3>
-                    <p className="mt-1 text-xs text-zinc-500">建立目前資料庫快照</p>
+                    <h3 className="font-bold text-white">{usesSupabase ? 'Supabase 資料備份' : '資料備份'}</h3>
+                    <p className="mt-1 text-xs text-zinc-500">
+                      {usesSupabase ? '建立目前名冊資料快照，Google 舊資料不會混入' : '建立目前資料庫快照'}
+                    </p>
                   </div>
                 </div>
                 <button
@@ -2103,7 +2106,16 @@ function SettingsTab({ data, setData, showToast, adminCall, onLogout }) {
                   {backupLoading ? <LoaderCircle className="h-5 w-5 animate-spin" /> : <DatabaseBackup className="h-5 w-5" />}
                   立即備份
                 </button>
-                {backup && <a href={backup.url} target="_blank" rel="noreferrer" className="mt-3 block truncate text-center text-xs text-emerald-400">{backup.name}</a>}
+                {backup && (
+                  <div className="mt-3 text-center">
+                    <a href={backup.url} target="_blank" rel="noreferrer" className="block truncate text-xs text-emerald-400">{backup.name}</a>
+                    {backup.counts && (
+                      <p className="mt-1 text-[11px] text-zinc-600">
+                        {backup.counts.workers} 位人員 · {backup.counts.contractors} 家公司 · 下載連結 10 分鐘有效
+                      </p>
+                    )}
+                  </div>
+                )}
               </section>
             </>
           )}

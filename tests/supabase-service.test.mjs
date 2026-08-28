@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { afterEach, test } from 'node:test';
 
 import {
+  createSupabaseBackup,
   getAdminDataFromSupabase,
   getPublicConfigFromSupabase,
   syncActionResultToSupabase,
@@ -161,4 +162,51 @@ test('Supabase mirrors a contractor action without exporting the Google sheets',
   assert.equal(result.contractors, 1);
   assert.equal(contractorRequest.body[0].id, 'sub-1');
   assert.equal(requests.length, 1);
+});
+
+test('Supabase backup snapshots current roster data without password hashes', async () => {
+  enableSupabase();
+  const requests = [];
+  globalThis.fetch = async (url, options = {}) => {
+    const text = String(url);
+    requests.push({ url: text, method: options.method || 'GET', body: options.body });
+    if (text.includes('/rest/v1/contractors?')) {
+      return new Response(JSON.stringify([
+        { id: 'main-1', name: '主承包商', company_type: 'primary', status: 'active', created_at: '2026-08-01T00:00:00.000Z', archived_at: null },
+      ]), { status: 200 });
+    }
+    if (text.includes('/rest/v1/workers?')) {
+      return new Response(JSON.stringify([
+        { id: 'worker-1', name: '王小明', id_number: 'A123456789', phone: '0912345678', contractor_id: 'main-1', contractor_name: '主承包商', photo_storage_path: 'main-1/worker-1.jpg', status: 'active' },
+      ]), { status: 200 });
+    }
+    if (text.includes('/rest/v1/managers?')) {
+      return new Response(JSON.stringify([
+        { id: 'manager-1', username: 'owner@example.com', display_name: '主要管理者', email: 'owner@example.com', role: 'owner', contractor_id: null, contractor_name: '', status: 'active', must_change_password: false },
+      ]), { status: 200 });
+    }
+    if (text.includes('/rest/v1/audit_logs?')) {
+      return new Response(JSON.stringify([]), { status: 200 });
+    }
+    if (text.endsWith('/storage/v1/bucket')) {
+      return new Response('{}', { status: 200 });
+    }
+    if (text.includes('/storage/v1/object/registry-backups/snapshots/')) {
+      return new Response('{}', { status: 200 });
+    }
+    if (text.includes('/storage/v1/object/sign/registry-backups/snapshots/')) {
+      return new Response(JSON.stringify({ signedURL: '/storage/v1/object/registry-backups/signed.json' }), { status: 200 });
+    }
+    throw new Error(`Unexpected request: ${text}`);
+  };
+
+  const result = await createSupabaseBackup({ id: 'owner-1', role: 'owner' });
+  assert.equal(result.source, 'supabase');
+  assert.deepEqual(result.counts, { contractors: 1, workers: 1, managers: 1, auditLogs: 0 });
+  assert.match(result.url, /^https:\/\/example\.supabase\.co\//);
+
+  const upload = requests.find((request) => request.url.includes('/storage/v1/object/registry-backups/'));
+  const snapshot = JSON.parse(Buffer.from(upload.body).toString('utf8'));
+  assert.equal(snapshot.workers[0].name, '王小明');
+  assert.equal(Object.hasOwn(snapshot.managers[0], 'password_hash'), false);
 });

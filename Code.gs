@@ -460,7 +460,8 @@ function disableManagersForPrimaryContractor_(db, contractorId) {
   return disabled;
 }
 
-function upsertPrimaryContractor_(db, name, actor) {
+function upsertPrimaryContractor_(db, name, actor, options) {
+  const settings = options || {};
   const contractorName = requireText_(name, '主承包商公司名稱', 100);
   const sheet = db.getSheetByName('包商');
   const contractors = readObjects_(sheet);
@@ -505,9 +506,13 @@ function upsertPrimaryContractor_(db, name, actor) {
   props.setProperty('PRIMARY_CONTRACTOR_ID', primary.id);
   props.setProperty('PRIMARY_CONTRACTOR_NAME', primary.name);
   clearPublicConfigCache_();
-  updateContractorDenormalizedNames_(db, primary.id, primary.name);
+  if (!settings.skipLegacyWorkerSync) {
+    updateContractorDenormalizedNames_(db, primary.id, primary.name);
+  }
   const disabledManagers = disableManagersForPrimaryContractor_(db, primary.id);
-  getOrCreateSubfolder_(getRootFolder_(), safeName_(primary.name, 80));
+  if (!settings.skipDriveFolder) {
+    getOrCreateSubfolder_(getRootFolder_(), safeName_(primary.name, 80));
+  }
   if (actor) {
     writeAudit_(actor, 'update', 'primary_contractor', primary.id, primary.name + ':disabledManagers=' + disabledManagers);
   }
@@ -516,7 +521,10 @@ function upsertPrimaryContractor_(db, name, actor) {
 
 function updatePrimaryContractorAdmin_(input, actor) {
   return withScriptLock_(() => {
-    const contractor = upsertPrimaryContractor_(getDb_(), input.name, actor);
+    const contractor = upsertPrimaryContractor_(getDb_(), input.name, actor, {
+      skipDriveFolder: input.skipDriveFolder === true,
+      skipLegacyWorkerSync: input.skipLegacyWorkerSync === true
+    });
     return contractorSummary_(contractor);
   });
 }
@@ -1499,7 +1507,9 @@ function addContractorAdmin_(input, actor) {
       archivedAt: ''
     };
     appendObject_(db.getSheetByName('包商'), CONTRACTOR_HEADERS, contractor);
-    getOrCreateSubfolder_(getRootFolder_(), safeName_(name, 80));
+    if (input.skipDriveFolder !== true) {
+      getOrCreateSubfolder_(getRootFolder_(), safeName_(name, 80));
+    }
     clearPublicConfigCache_();
     writeAudit_(actor, 'create', 'contractor', contractor.id, name);
     return contractor;
@@ -1516,9 +1526,11 @@ function archiveContractorAdmin_(input, actor) {
     if (contractorType_(contractor) === CONTRACTOR_TYPE_PRIMARY) {
       throw new Error('主承包商不可封存；如需更名請至帳號與系統設定');
     }
-    const activeWorkers = readObjects_(db.getSheetByName('人員'))
-      .filter(item => item.contractorId === id && (item.status || 'active') === 'active');
-    if (activeWorkers.length) throw new Error('此承包商仍有在冊人員，無法封存');
+    if (input.skipLegacyWorkerCheck !== true) {
+      const activeWorkers = readObjects_(db.getSheetByName('人員'))
+        .filter(item => item.contractorId === id && (item.status || 'active') === 'active');
+      if (activeWorkers.length) throw new Error('此承包商仍有在冊人員，無法封存');
+    }
 
     const now = new Date().toISOString();
     updateRowById_(db.getSheetByName('包商'), id, { status: 'archived', archivedAt: now });
