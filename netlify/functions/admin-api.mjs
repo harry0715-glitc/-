@@ -259,7 +259,7 @@ async function handler(event) {
 
   if (isSupabaseConfigured() && SUPABASE_MIRROR_ACTIONS.has(request.action)) {
     try {
-      await syncGasSnapshot(config, actorToken);
+      await syncReferenceDataSnapshot(config, actorToken);
     } catch (error) {
       console.warn(`Supabase 資料鏡像同步失敗：${error.message}`);
     }
@@ -428,7 +428,7 @@ async function callGasAction(config, action, payload, actorToken, timeoutMs) {
   return upstreamBody.data;
 }
 
-async function syncGasSnapshot(config, actorToken) {
+async function syncReferenceDataSnapshot(config, actorToken) {
   const migrationBody = await postJson(config.appsScriptUrl, {
     action: "adminExportSupabaseData",
     payload: {},
@@ -438,7 +438,12 @@ async function syncGasSnapshot(config, actorToken) {
   if (!migrationBody || migrationBody.ok !== true) {
     throw new Error("Google 資料同步來源無法取得");
   }
-  return syncBundleToSupabase(migrationBody.data);
+  // Once Supabase is active, Google remains the control plane for accounts and
+  // companies, while worker records are created and edited only in Supabase.
+  return syncBundleToSupabase({
+    ...migrationBody.data,
+    workers: [],
+  });
 }
 
 function supabaseErrorResponse(error) {
