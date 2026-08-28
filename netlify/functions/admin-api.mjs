@@ -174,6 +174,16 @@ async function handler(event) {
     }
   }
 
+  // Repair sessions created before Supabase was enabled without forcing the
+  // administrator to discover the logout/login workaround.
+  if (isSupabaseEnabled() && !supabaseActor) {
+    try {
+      supabaseActor = await recoverSupabaseActor(config, session, actorToken);
+    } catch (error) {
+      console.warn(`Supabase 管理者補同步失敗：${error.message}`);
+    }
+  }
+
   if (request.action === "adminGetSession" && supabaseActor) {
     return jsonResponse(200, {
       ok: true,
@@ -433,6 +443,21 @@ async function callGasAction(config, action, payload, actorToken, timeoutMs) {
     );
   }
   return upstreamBody.data;
+}
+
+async function recoverSupabaseActor(config, session, actorToken) {
+  const upstreamBody = await postJson(config.appsScriptUrl, {
+    action: "adminGetSession",
+    payload: {},
+    adminSecret: config.gasAdminSecret,
+    actorToken
+  }, UPSTREAM_TIMEOUT_MS);
+  if (!upstreamBody || upstreamBody.ok !== true) return null;
+
+  const profile = extractProfile(upstreamBody);
+  if (!profile?.id || String(profile.id) !== session.managerId) return null;
+  await syncManagerFromLogin(profile, session.sessionVersion);
+  return getManagerBySession(session.managerId, session.sessionVersion);
 }
 
 async function syncReferenceDataSnapshot(config, actorToken) {
