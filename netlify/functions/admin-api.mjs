@@ -198,7 +198,7 @@ async function handler(event) {
       return jsonResponse(migrationBody ? 400 : 502, {
         ok: false,
         error: migrationBody
-          ? "Google 資料匯出失敗，請確認 Apps Script 已部署最新版本"
+          ? `Google 資料匯出失敗：${safeMigrationError(migrationBody.error)}`
           : "Google 資料服務逾時，請稍後再試"
       });
     }
@@ -472,6 +472,11 @@ function supabaseErrorResponse(error) {
     }
   }
   return errorResponse(502);
+}
+
+function safeMigrationError(value) {
+  const message = String(value || '').replace(/\s+/g, ' ').trim().slice(0, 220);
+  return message || 'Apps Script 未回傳錯誤原因，請查看執行記錄';
 }
 
 function createSessionCookie(managerId, sessionVersion, sessionSecret) {
