@@ -1,5 +1,13 @@
 import fontkit from '@pdf-lib/fontkit';
-import { PDFDocument, rgb } from 'pdf-lib';
+import {
+  PDFDocument,
+  clip,
+  endPath,
+  popGraphicsState,
+  pushGraphicsState,
+  rectangle,
+  rgb,
+} from 'pdf-lib';
 
 const PAGE_WIDTH = 595.28;
 const PAGE_HEIGHT = 841.89;
@@ -8,8 +16,8 @@ const CONTENT_WIDTH = PAGE_WIDTH - MARGIN * 2;
 const FOOTER_Y = 27;
 const MIN_FONT_SIZE = 12;
 const PHOTO_WIDTH = 123;
-const ROW_HEIGHT = 180;
-const FONT_URL = new URL('./netlify/functions/assets/NotoSansTC-Regular.woff2', import.meta.url);
+const ROW_HEIGHT = 164;
+const FONT_URL = new URL('./netlify/functions/assets/NotoSansTC-VF.ttf', import.meta.url);
 
 let fontBytesPromise;
 
@@ -21,7 +29,7 @@ export async function createRosterPdf(report, options = {}) {
   const pdf = await PDFDocument.create();
   pdf.registerFontkit(fontkit);
   const fontBytes = options.fontBytes || await loadFontBytes();
-  const font = await pdf.embedFont(fontBytes, { subset: true });
+  const font = await pdf.embedFont(fontBytes, { subset: false });
   let page;
   let y;
   let pageNumber = 0;
@@ -46,7 +54,7 @@ export async function createRosterPdf(report, options = {}) {
     }
     const photo = await embedPhoto(pdf, photos[index], workers[index]?.name);
     drawWorker(page, workers[index], photo, index + 1, y, font);
-    y -= ROW_HEIGHT + 18;
+    y -= ROW_HEIGHT + 44;
   }
 
   drawFooter(page, pageNumber, font);
@@ -134,7 +142,7 @@ function drawWorker(page, worker, photo, number, topY, font) {
   const rowBottom = rowTop - ROW_HEIGHT;
   const detailsX = MARGIN + PHOTO_WIDTH;
   page.drawRectangle({ x: MARGIN, y: rowBottom, width: CONTENT_WIDTH, height: ROW_HEIGHT, borderColor: rgb(0.63, 0.63, 0.67), borderWidth: 0.75 });
-  page.drawImage(photo, { x: MARGIN, y: rowBottom, width: PHOTO_WIDTH, height: ROW_HEIGHT });
+  drawCoverImage(page, photo, MARGIN, rowBottom, PHOTO_WIDTH, ROW_HEIGHT);
   page.drawLine({ start: { x: detailsX, y: rowBottom }, end: { x: detailsX, y: rowTop }, thickness: 0.75, color: rgb(0.63, 0.63, 0.67) });
 
   const details = workerDetails(worker);
@@ -148,6 +156,36 @@ function drawWorker(page, worker, photo, number, topY, font) {
       textY -= 14.6;
     });
   });
+}
+
+function drawCoverImage(page, image, x, y, width, height) {
+  const placement = coverDimensions(image.width, image.height, x, y, width, height);
+
+  page.pushOperators(
+    pushGraphicsState(),
+    rectangle(x, y, width, height),
+    clip(),
+    endPath(),
+  );
+  page.drawImage(image, {
+    x: placement.x,
+    y: placement.y,
+    width: placement.width,
+    height: placement.height,
+  });
+  page.pushOperators(popGraphicsState());
+}
+
+export function coverDimensions(imageWidth, imageHeight, x, y, width, height) {
+  const scale = Math.max(width / imageWidth, height / imageHeight);
+  const drawWidth = imageWidth * scale;
+  const drawHeight = imageHeight * scale;
+  return {
+    x: x + (width - drawWidth) / 2,
+    y: y + (height - drawHeight) / 2,
+    width: drawWidth,
+    height: drawHeight,
+  };
 }
 
 function workerDetails(worker) {
@@ -195,7 +233,7 @@ function display(value) {
 function formatTaiwanDateTime(value) {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return display(value);
-  return new Intl.DateTimeFormat('zh-TW', {
+  const parts = new Intl.DateTimeFormat('en-CA', {
     timeZone: 'Asia/Taipei',
     year: 'numeric',
     month: '2-digit',
@@ -204,5 +242,7 @@ function formatTaiwanDateTime(value) {
     minute: '2-digit',
     second: '2-digit',
     hour12: false,
-  }).format(date);
+  }).formatToParts(date);
+  const read = (type) => parts.find((part) => part.type === type)?.value || '';
+  return `${read('year')}/${read('month')}/${read('day')} ${read('hour')}:${read('minute')}:${read('second')}`;
 }

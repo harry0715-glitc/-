@@ -3,12 +3,23 @@ import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 import { PDFDocument } from 'pdf-lib';
 
-import { createRosterPdf } from '../client-pdf.mjs';
+import { coverDimensions, createRosterPdf } from '../client-pdf.mjs';
 
 const ONE_PIXEL_PNG = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=';
 
+test('photo placement fills the fixed cell without changing aspect ratio', () => {
+  for (const [sourceWidth, sourceHeight] of [[1600, 900], [900, 1600], [420, 540]]) {
+    const placed = coverDimensions(sourceWidth, sourceHeight, 10, 20, 123, 164);
+    assert.ok(placed.width >= 123 - 0.000001);
+    assert.ok(placed.height >= 164 - 0.000001);
+    assert.ok(Math.abs((placed.width / placed.height) - (sourceWidth / sourceHeight)) < 0.000001);
+    assert.ok(Math.abs((placed.x + placed.width / 2) - (10 + 123 / 2)) < 0.000001);
+    assert.ok(Math.abs((placed.y + placed.height / 2) - (20 + 164 / 2)) < 0.000001);
+  }
+});
+
 test('browser PDF generator creates a Chinese roster without a server round trip', async () => {
-  const fontBytes = await readFile(new URL('../netlify/functions/assets/NotoSansTC-Regular.woff2', import.meta.url));
+  const fontBytes = await readFile(new URL('../netlify/functions/assets/NotoSansTC-VF.ttf', import.meta.url));
   const workers = Array.from({ length: 10 }, (_, index) => ({
     id: `worker-${index}`,
     name: `測試人員${index + 1}`,
