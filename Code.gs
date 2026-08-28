@@ -1544,9 +1544,29 @@ function archiveContractorAdmin_(input, actor) {
   return withScriptLock_(() => {
     const db = getDb_();
     const id = requireText_(input.id, '承包商 ID', 100);
-    const contractor = readObjects_(db.getSheetByName('包商'))
+    const contractorSheet = db.getSheetByName('包商');
+    const contractors = readObjects_(contractorSheet);
+    let contractor = contractors
       .find(item => item.id === id && (item.status || 'active') === 'active');
-    if (!contractor) throw new Error('找不到承包商');
+    if (!contractor) {
+      if (contractors.some(item => item.id === id)) {
+        throw new Error('承包商已停用或不存在');
+      }
+      const contractorName = requireText_(input.contractorName, '承包商名稱', 100);
+      const existingByName = contractors.find(item =>
+        item.name === contractorName && (item.status || 'active') === 'active'
+      );
+      if (existingByName) throw new Error('承包商資料不一致，請重新整理後再試');
+      contractor = {
+        id: id,
+        name: contractorName,
+        companyType: CONTRACTOR_TYPE_SUBCONTRACTOR,
+        createdAt: new Date().toISOString(),
+        status: 'active',
+        archivedAt: ''
+      };
+      appendObject_(contractorSheet, CONTRACTOR_HEADERS, contractor);
+    }
     if (contractorType_(contractor) === CONTRACTOR_TYPE_PRIMARY) {
       throw new Error('主承包商不可封存；如需更名請至帳號與系統設定');
     }

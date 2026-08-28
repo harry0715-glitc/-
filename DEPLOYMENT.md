@@ -31,7 +31,7 @@
 1. 開啟 [Google Apps Script](https://script.google.com/) 的原專案。
 2. 先備份原本的 `Code.gs`，再將專案內容全部替換為本專案的 `Code.gs`。
 3. 在「專案設定」將時區設為 `Asia/Taipei`。
-   本版本的 `createManagerAdmin_` 會在需要時，把 Supabase 新增但尚未出現在 Google 試算表的次承包商補入「包商」工作表，讓原本的次管理者帳號流程可以繼續使用。若要替新公司建立次管理者，必須先部署本版本的 `Code.gs`。
+   本版本的 `createManagerAdmin_` 與 `archiveContractorAdmin_` 會在需要時，把 Supabase 新增但尚未出現在 Google 試算表的次承包商補入「包商」工作表，讓原本的次管理者帳號與封存流程可以繼續使用。若要替新公司建立次管理者或封存新公司，必須先部署本版本的 `Code.gs`。
 4. 在「專案設定 > 指令碼屬性」新增：
 
 | 屬性 | 值 |

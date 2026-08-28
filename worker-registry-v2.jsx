@@ -1662,7 +1662,10 @@ function ContractorsTab({ data, showToast, adminCall, refresh }) {
               onClick={async () => {
                 if (!confirm(`確定封存「${contractor.name}」？`)) return;
                 try {
-                  await adminCall('adminArchiveContractor', { id: contractor.id });
+                  await adminCall('adminArchiveContractor', {
+                    id: contractor.id,
+                    contractorName: contractor.name
+                  });
                   showToast('次承包商已封存');
                   void refresh().catch((error) => {
                     showToast(`清單更新失敗：${error.message}`, 'error');
