@@ -5,6 +5,7 @@ import {
   createSupabaseBackup,
   getAdminDataFromSupabase,
   getPublicConfigFromSupabase,
+  generateReportFromSupabase,
   syncActionResultToSupabase,
   syncBundleToSupabase,
 } from '../netlify/functions/supabase-service.mjs';
@@ -106,6 +107,96 @@ test('Supabase admin data preserves contractor scoping and existing field names'
   assert.deepEqual(result.contractors.map((item) => item.id), ['sub-1']);
   assert.equal(result.workers[0].idNumber, 'A123456789');
   assert.equal(result.workers[0].hasPhoto, true);
+});
+
+test('Supabase reports pass a signed private photo URL to Apps Script', async () => {
+  enableSupabase();
+  let gasPayload = null;
+  globalThis.fetch = async (url) => {
+    const text = String(url);
+    if (text.includes('/contractors?')) {
+      return new Response(JSON.stringify([
+        { id: 'main-1', name: '主承包商', company_type: 'primary', status: 'active', created_at: '2026-08-01T00:00:00.000Z' },
+      ]), { status: 200 });
+    }
+    if (text.includes('/workers?')) {
+      return new Response(JSON.stringify([
+        {
+          id: 'worker-1',
+          name: '王小明',
+          id_number: 'A123456789',
+          phone: '0912345678',
+          emergency_contact: '王大明',
+          emergency_phone: '0900000000',
+          blood_type: 'O',
+          job_title: '水電',
+          contractor_id: 'main-1',
+          contractor_name: '主承包商',
+          entry_date: '2026-08-01',
+          notes: '',
+          created_at: '2026-08-28T01:00:00.000Z',
+          updated_at: '2026-08-28T01:00:00.000Z',
+          photo_storage_path: 'main-1/worker-1.jpg',
+          photo_file_id: null,
+        },
+      ]), { status: 200 });
+    }
+    if (text.includes('/storage/v1/object/sign/worker-photos/')) {
+      return new Response(JSON.stringify({
+        signedURL: '/storage/v1/object/sign/worker-photos/main-1/worker-1.jpg?token=test',
+      }), { status: 200 });
+    }
+    throw new Error(`Unexpected request: ${text}`);
+  };
+
+  const result = await generateReportFromSupabase(
+    { type: 'daily', date: '2026-08-28' },
+    { id: 'owner-1', role: 'owner', email: 'owner@example.com' },
+    async (action, payload) => {
+      assert.equal(action, 'adminGenerateReportFromPayload');
+      gasPayload = payload;
+      return { fileId: 'report-1' };
+    }
+  );
+
+  assert.equal(result.fileId, 'report-1');
+  assert.match(gasPayload.workers[0].photoSignedUrl, /storage\/v1\/object\/sign\/worker-photos/);
+  assert.equal(gasPayload.workers[0].photoStoragePath, 'main-1/worker-1.jpg');
+});
+
+test('Supabase reports stop instead of silently creating a roster without a required photo', async () => {
+  enableSupabase();
+  globalThis.fetch = async (url) => {
+    const text = String(url);
+    if (text.includes('/contractors?')) {
+      return new Response(JSON.stringify([
+        { id: 'main-1', name: '主承包商', company_type: 'primary', status: 'active', created_at: '2026-08-01T00:00:00.000Z' },
+      ]), { status: 200 });
+    }
+    if (text.includes('/workers?')) {
+      return new Response(JSON.stringify([
+        {
+          id: 'worker-1',
+          name: '王小明',
+          contractor_id: 'main-1',
+          contractor_name: '主承包商',
+          created_at: '2026-08-28T01:00:00.000Z',
+          photo_storage_path: null,
+          photo_file_id: null,
+        },
+      ]), { status: 200 });
+    }
+    throw new Error(`Unexpected request: ${text}`);
+  };
+
+  await assert.rejects(
+    () => generateReportFromSupabase(
+      { type: 'daily', date: '2026-08-28' },
+      { id: 'owner-1', role: 'owner', email: 'owner@example.com' },
+      async () => ({})
+    ),
+    /王小明.*照片資料不存在/
+  );
 });
 
 test('Supabase migration batches worker writes for larger legacy bundles', async () => {

@@ -11,6 +11,9 @@ const CONTRACTOR_TYPE_SUBCONTRACTOR = 'subcontractor';
 const PUBLIC_CONFIG_CACHE_KEY = 'workers_registry_public_config_v1';
 const PUBLIC_CONFIG_PROPERTY_KEY = 'PUBLIC_CONFIG_SNAPSHOT_V1';
 const PUBLIC_CONFIG_CACHE_SECONDS = 300;
+const REPORT_MIN_FONT_SIZE = 12;
+const REPORT_PHOTO_WIDTH_PT = 108;
+const REPORT_PHOTO_HEIGHT_PT = 139;
 const TAIWAN_ID_AREA_CODES = {
   A: 10, B: 11, C: 12, D: 13, E: 14, F: 15, G: 16, H: 17,
   I: 34, J: 18, K: 19, L: 20, M: 21, N: 22, O: 35, P: 23,
@@ -1664,7 +1667,7 @@ function generateReportAdmin_(input, actor) {
 function styleDocumentText_(element, fontSize, bold, color) {
   const text = element.editAsText();
   text.setFontFamily('Noto Sans TC');
-  if (fontSize) text.setFontSize(fontSize);
+  text.setFontSize(Math.max(REPORT_MIN_FONT_SIZE, Number(fontSize) || REPORT_MIN_FONT_SIZE));
   if (bold != null) text.setBold(Boolean(bold));
   if (color) text.setForegroundColor(color);
   return element;
@@ -1672,8 +1675,8 @@ function styleDocumentText_(element, fontSize, bold, color) {
 
 function appendWorkerDetail_(cell, label, value, bold) {
   const paragraph = cell.appendParagraph(label + '：' + (value || '—'));
-  paragraph.setSpacingAfter(1);
-  styleDocumentText_(paragraph, 8.5, Boolean(bold), '#202124');
+  paragraph.setSpacingBefore(0).setSpacingAfter(0).setLineSpacing(1);
+  styleDocumentText_(paragraph, REPORT_MIN_FONT_SIZE, Boolean(bold), '#202124');
   return paragraph;
 }
 
@@ -1705,7 +1708,7 @@ function createRosterPdf_(report, workers, viewerEmails) {
   styleDocumentText_(primaryHeading, 15, true, '#202124');
   const reportHeading = header.appendParagraph('施工人員名冊｜' + report.reportName);
   reportHeading.setAlignment(DocumentApp.HorizontalAlignment.CENTER).setSpacingAfter(4);
-  styleDocumentText_(reportHeading, 10, true, '#C2410C');
+  styleDocumentText_(reportHeading, 13, true, '#C2410C');
 
   const footer = doc.addFooter();
   const footerText = footer.appendParagraph(
@@ -1713,7 +1716,7 @@ function createRosterPdf_(report, workers, viewerEmails) {
     Utilities.formatDate(now, Session.getScriptTimeZone(), 'yyyy/MM/dd HH:mm:ss')
   );
   footerText.setAlignment(DocumentApp.HorizontalAlignment.CENTER);
-  styleDocumentText_(footerText, 7.5, false, '#71717A');
+  styleDocumentText_(footerText, REPORT_MIN_FONT_SIZE, false, '#71717A');
 
   const metaTable = body.appendTable([
     ['報表範圍', report.scopeLabel],
@@ -1721,7 +1724,7 @@ function createRosterPdf_(report, workers, viewerEmails) {
     ['人員筆數', String(workers.length)]
   ]);
   metaTable.setBorderColor('#D4D4D8').setBorderWidth(0.75);
-  metaTable.setColumnWidth(0, 76).setColumnWidth(1, 447);
+  metaTable.setColumnWidth(0, 92).setColumnWidth(1, 431);
   for (let rowIndex = 0; rowIndex < metaTable.getNumRows(); rowIndex++) {
     const row = metaTable.getRow(rowIndex);
     const labelCell = row.getCell(0);
@@ -1729,7 +1732,7 @@ function createRosterPdf_(report, workers, viewerEmails) {
     labelCell.setBackgroundColor('#F4F4F5');
     [labelCell, valueCell].forEach(cell => {
       cell.setPaddingTop(4).setPaddingBottom(4).setPaddingLeft(6).setPaddingRight(6);
-      styleDocumentText_(cell, 8.5, cell === labelCell, '#202124');
+      styleDocumentText_(cell, REPORT_MIN_FONT_SIZE, cell === labelCell, '#202124');
     });
   }
   body.appendParagraph('').setSpacingAfter(2);
@@ -1737,7 +1740,7 @@ function createRosterPdf_(report, workers, viewerEmails) {
   if (!workers.length) {
     const empty = body.appendParagraph('此篩選條件目前無人員資料。');
     empty.setAlignment(DocumentApp.HorizontalAlignment.CENTER).setSpacingBefore(24);
-    styleDocumentText_(empty, 11, false, '#71717A');
+    styleDocumentText_(empty, REPORT_MIN_FONT_SIZE, false, '#71717A');
   } else {
     let pageUnits = 0;
     workers.forEach((worker, index) => {
@@ -1774,7 +1777,7 @@ function createRosterPdf_(report, workers, viewerEmails) {
 function appendWorkerToDocument_(body, worker, index) {
   const title = body.appendParagraph((index + 1) + '. ' + worker.name + '｜' + worker.jobTitle);
   title.setSpacingBefore(4).setSpacingAfter(3);
-  styleDocumentText_(title, 11.5, true, '#202124');
+  styleDocumentText_(title, 14, true, '#202124');
   const table = body.appendTable([['', '']]);
   table.setBorderColor('#A1A1AA').setBorderWidth(0.75);
   table.setColumnWidth(0, 108).setColumnWidth(1, 415);
@@ -1783,16 +1786,16 @@ function appendWorkerToDocument_(body, worker, index) {
   photoCell.clear();
   detailsCell.clear();
   photoCell
-    .setPaddingTop(5)
-    .setPaddingBottom(5)
-    .setPaddingLeft(5)
-    .setPaddingRight(5)
+    .setPaddingTop(0)
+    .setPaddingBottom(0)
+    .setPaddingLeft(0)
+    .setPaddingRight(0)
     .setVerticalAlignment(DocumentApp.VerticalAlignment.CENTER);
   detailsCell
-    .setPaddingTop(5)
-    .setPaddingBottom(5)
+    .setPaddingTop(2)
+    .setPaddingBottom(2)
     .setPaddingLeft(7)
-    .setPaddingRight(7)
+    .setPaddingRight(4)
     .setVerticalAlignment(DocumentApp.VerticalAlignment.TOP);
 
   const photoId = worker.photoFileId || extractDriveFileId_(worker.photoUrl);
@@ -1818,7 +1821,9 @@ function appendWorkerToDocument_(body, worker, index) {
     }
   }
   if (photoBlob) {
-    photoCell.appendImage(photoBlob).setWidth(98).setHeight(126);
+    photoCell.appendImage(photoBlob)
+      .setWidth(REPORT_PHOTO_WIDTH_PT)
+      .setHeight(REPORT_PHOTO_HEIGHT_PT);
   } else if (photoId || worker.photoSignedUrl) {
     photoCell.appendParagraph('照片無法讀取');
   } else {

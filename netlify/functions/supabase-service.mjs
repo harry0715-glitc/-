@@ -393,6 +393,13 @@ export async function generateReportFromSupabase(input, actor, callGas) {
     }
   }));
 
+  const missingPhoto = workersWithSignedUrls.find((worker) => (
+    !worker.photoSignedUrl && !worker.photoFileId
+  ));
+  if (missingPhoto) {
+    throw new UserInputError(`「${missingPhoto.name}」的照片資料不存在，請先重新上傳照片`);
+  }
+
   return callGas('adminGenerateReportFromPayload', {
     type,
     date,
@@ -887,6 +894,8 @@ function workerSummaryFromRow(row, contractorMap) {
 
 function workerForReport(row, contractors) {
   const contractor = contractors.find((item) => item.id === row.contractor_id);
+  const photoFileId = String(row.photo_file_id || row.photoFileId || '').trim();
+  const photoStoragePath = String(row.photo_storage_path || row.photoStoragePath || '').trim();
   return {
     id: String(row.id),
     name: row.name,
@@ -903,8 +912,8 @@ function workerForReport(row, contractors) {
     notes: row.notes || '',
     createdAt: row.created_at,
     updatedAt: row.updated_at,
-    photoFileId: row.photo_file_id || '',
-    photoStoragePath: row.photo_storage_path || '',
+    photoFileId,
+    photoStoragePath,
   };
 }
 
