@@ -32,7 +32,7 @@ async function payload(pages = 3) {
     expectedUpdatedAt: worker.updated_at,
     documentPacket: `data:application/pdf;base64,${Buffer.from(await pdf.save()).toString('base64')}`,
     documentAcceptance: {
-      templateVersion: 'worker-onboarding-v1', signedAt: now,
+      templateVersion: 'worker-onboarding-v2', signedAt: now,
       documents: Object.fromEntries(['privacy', 'health', 'safety'].map((key) => [key, { accepted: true, viewedAt: now, acceptedAt: now }])),
     },
   };
@@ -78,7 +78,7 @@ test('download is restricted to active current template and returned through the
     return new Response(documentBytes, { headers: { 'Content-Type': 'application/pdf' } });
   });
   await assert.rejects(getWorkerDocumentPacketFromSupabase({ id: 'w1' }, owner), /文件版本/);
-  version = 'worker-onboarding-v1';
+  version = 'worker-onboarding-v2';
   const result = await getWorkerDocumentPacketFromSupabase({ id: 'w1' }, owner);
   assert.equal(result.dataUrl, `data:application/pdf;base64,${documentBytes.toString('base64')}`);
   assert.equal(result.sha256, sha256);

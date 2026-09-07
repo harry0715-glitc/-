@@ -1,5 +1,5 @@
 export const PRIMARY_CONTRACTOR_LEGAL_NAME = '楓根室內裝修設計有限公司';
-export const DOCUMENT_TEMPLATE_VERSION = 'worker-onboarding-v1';
+export const DOCUMENT_TEMPLATE_VERSION = 'worker-onboarding-v2';
 
 export const WORKER_DOCUMENTS = Object.freeze([
   {
@@ -252,18 +252,17 @@ async function createOverlay(index, values) {
 }
 
 async function drawPrivacyOverlay(context, values) {
-  drawFittedText(context, values.serviceContractorName, 130, 735, 138, 11);
-  drawFittedText(context, values.worker.name, 346, 735, 96, 11);
-  drawFittedText(context, values.worker.phone, 130, 761, 138, 11);
-  drawDateParts(context, values.signedAt, { yearX: 346, monthX: 394, dayX: 436, y: 761 });
-  await drawSignature(context, values.signatureDataUrl, 342, 698, 110, 35);
+  drawFittedText(context, values.serviceContractorName, 130, 748, 138, 11);
+  drawFittedText(context, values.worker.phone, 130, 774, 138, 11);
+  drawDateParts(context, values.signedAt, { yearX: 346, monthX: 394, dayX: 436, y: 774 });
+  await drawSignature(context, values.signatureDataUrl, 342, 711, 110, 35);
 }
 
 async function drawHealthOverlay(context, values) {
-  drawFittedText(context, PRIMARY_CONTRACTOR_LEGAL_NAME, 156, 151, 121);
-  drawFittedText(context, values.subcontractorName, 341, 151, 177);
-  drawFittedText(context, values.worker.name, 156, 177, 360);
-  drawFittedText(context, values.worker.jobTitle, 156, 206, 360);
+  drawFittedText(context, PRIMARY_CONTRACTOR_LEGAL_NAME, 156, 156, 121);
+  drawFittedText(context, values.subcontractorName, 341, 156, 177);
+  drawFittedText(context, values.worker.name, 156, 182, 360);
+  drawFittedText(context, values.worker.jobTitle, 156, 211, 360);
 
   const selected = new Set(values.health?.conditions || []);
   HEALTH_CONDITIONS.forEach(({ id }, index) => {
@@ -277,17 +276,17 @@ async function drawHealthOverlay(context, values) {
   if (values.health?.mode !== 'declared') drawCheck(context, 119, 692);
   drawCheck(context, String(values.health?.other || '').trim() ? 102 : 126, 662.5);
   drawFittedText(context, values.health?.other || '', 289, 657, 226, 10.5);
-  await drawSignature(context, values.signatureDataUrl, 160, 700, 175, 30);
-  drawDateText(context, values.signedAt, 411, 716, 110, 10.5);
+  await drawSignature(context, values.signatureDataUrl, 160, 708, 175, 30);
+  drawDateText(context, values.signedAt, 411, 724, 110, 10.5);
 }
 
 async function drawSafetyOverlay(context, values) {
-  drawFittedText(context, PRIMARY_CONTRACTOR_LEGAL_NAME, 157, 153, 121);
-  drawFittedText(context, values.subcontractorName, 341, 153, 177);
-  drawFittedText(context, values.worker.name, 157, 179, 360);
-  drawFittedText(context, values.worker.jobTitle, 157, 208, 360);
-  await drawSignature(context, values.signatureDataUrl, 160, 650, 175, 32);
-  drawDateText(context, values.signedAt, 142, 709, 150, 10.5);
+  drawFittedText(context, PRIMARY_CONTRACTOR_LEGAL_NAME, 157, 158, 121);
+  drawFittedText(context, values.subcontractorName, 341, 158, 177);
+  drawFittedText(context, values.worker.name, 157, 184, 360);
+  drawFittedText(context, values.worker.jobTitle, 157, 213, 360);
+  await drawSignature(context, values.signatureDataUrl, 160, 658, 175, 32);
+  drawDateText(context, values.signedAt, 142, 717, 150, 10.5);
 }
 
 function drawFittedText(context, value, x, y, maxWidth, initialSize = 12) {
@@ -295,13 +294,18 @@ function drawFittedText(context, value, x, y, maxWidth, initialSize = 12) {
   if (!text) return;
   const size = Math.max(12, initialSize);
   context.font = `${size}px WorkerFormNoto, "Microsoft JhengHei", sans-serif`;
-  const lines = [''];
+  let lines = [''];
   for (const character of text) {
     const last = lines.length - 1;
     if (context.measureText(lines[last] + character).width > maxWidth) lines.push(character);
     else lines[last] += character;
   }
   if (lines.length > 2) throw new Error(`欄位內容過長，請縮短後再簽署：${text}`);
+  if (lines.length === 2) {
+    const middle = Math.ceil(text.length / 2);
+    const balanced = [text.slice(0, middle), text.slice(middle)];
+    if (balanced.every((line) => context.measureText(line).width <= maxWidth)) lines = balanced;
+  }
   lines.forEach((line, index) => context.fillText(line, x, y - (lines.length - 1 - index) * 13));
 }
 

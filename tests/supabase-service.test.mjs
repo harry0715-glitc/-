@@ -97,7 +97,7 @@ test('Supabase admin data preserves contractor scoping and existing field names'
         {
           id: 'packet-1',
           worker_id: 'worker-1',
-          template_version: 'worker-onboarding-v1',
+          template_version: 'worker-onboarding-v2',
           signed_at: '2026-08-01T00:00:00.000Z',
           status: 'active',
         },
@@ -122,7 +122,7 @@ test('Supabase admin data preserves contractor scoping and existing field names'
   assert.equal(result.workers[0].idNumber, 'A123456789');
   assert.equal(result.workers[0].hasPhoto, true);
   assert.equal(result.workers[0].documentsComplete, true);
-  assert.equal(result.workers[0].documentTemplateVersion, 'worker-onboarding-v1');
+  assert.equal(result.workers[0].documentTemplateVersion, 'worker-onboarding-v2');
 });
 
 test('Supabase adds a contractor directly without calling Apps Script', async () => {
@@ -343,7 +343,7 @@ test('Supabase backup snapshots current roster data without password hashes', as
           contractor_id: 'main-1',
           storage_path: 'main-1/worker-1/packet-1.pdf',
           sha256: 'a'.repeat(64),
-          template_version: 'worker-onboarding-v1',
+          template_version: 'worker-onboarding-v2',
           signer_name: '王小明',
           signed_at: '2026-08-01T00:00:00.000Z',
           status: 'active',
