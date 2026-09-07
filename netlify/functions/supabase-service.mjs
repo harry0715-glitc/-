@@ -9,6 +9,7 @@ import {
   supabaseDelete,
   supabaseDeleteObject,
   supabaseDeletePhoto,
+  supabaseDownloadObject,
   supabaseDownloadPhoto,
   supabaseEnsurePrivateBucket,
   supabaseInsert,
@@ -25,7 +26,6 @@ const MAX_PREVIEW_BYTES = 2_500_000;
 const DOCUMENT_BUCKET = 'worker-documents';
 const DOCUMENT_PACKET_MAX_BYTES = 2_500_000;
 const DOCUMENT_PACKET_MAX_CHARACTERS = 3_400_000;
-const DOCUMENT_LINK_TTL_SECONDS = 5 * 60;
 const DOCUMENT_TEMPLATE_VERSION = 'worker-onboarding-v1';
 const BACKUP_BUCKET = 'registry-backups';
 const MAX_BACKUP_BYTES = 25_000_000;
@@ -580,17 +580,20 @@ export async function getWorkerDocumentPacketFromSupabase(input, actor) {
   if (packet.template_version !== DOCUMENT_TEMPLATE_VERSION) {
     throw new UserInputError('文件版本已更新，請重新簽署');
   }
+  const document = await supabaseDownloadObject(DOCUMENT_BUCKET, packet.storage_path);
+  if (!document.bytes?.length || document.bytes.length > DOCUMENT_PACKET_MAX_BYTES) {
+    throw new UserInputError('簽署文件內容不完整，請重新簽署');
+  }
+  const actualHash = createHash('sha256').update(document.bytes).digest('hex');
+  if (actualHash !== packet.sha256) {
+    throw new UserInputError('簽署文件完整性驗證失敗，請重新簽署');
+  }
   return {
     id: packet.id,
-    url: await supabaseCreateSignedObjectUrl(
-      DOCUMENT_BUCKET,
-      packet.storage_path,
-      DOCUMENT_LINK_TTL_SECONDS,
-    ),
+    dataUrl: `data:application/pdf;base64,${document.bytes.toString('base64')}`,
     sha256: packet.sha256,
     templateVersion: packet.template_version,
     signedAt: packet.signed_at,
-    expiresAt: new Date(Date.now() + DOCUMENT_LINK_TTL_SECONDS * 1000).toISOString(),
   };
 }
 

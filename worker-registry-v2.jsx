@@ -45,6 +45,7 @@ import {
   createDocumentAcceptance,
   createEmptyDocumentState,
   createWorkerDocumentPacket,
+  dataUrlToBlob,
   mergeRosterAndDocumentPackets,
   validateDocumentState,
 } from './worker-documents.mjs';
@@ -809,6 +810,40 @@ function SignatureModal({ workerName, onClose, onConfirm }) {
   );
 }
 
+function HealthSurvey({ value, update }) {
+  return (
+    <div className="border-t border-zinc-800 pb-4 pt-4 sm:col-span-2">
+      <h4 className="text-sm font-bold text-white">健康狀況調查</h4>
+      <div className="mt-3 grid grid-cols-2 rounded-lg border border-zinc-700 p-1 sm:w-[360px]">
+        <button type="button" onClick={() => update((next) => { next.health = { mode: 'none', conditions: [], other: '' }; })} className={`rounded-md px-3 py-2 text-sm font-bold ${value.health.mode === 'none' ? 'bg-emerald-600 text-white' : 'text-zinc-400'}`}>無上述疾病</button>
+        <button type="button" onClick={() => update((next) => { next.health.mode = 'declared'; })} className={`rounded-md px-3 py-2 text-sm font-bold ${value.health.mode === 'declared' ? 'bg-orange-600 text-white' : 'text-zinc-400'}`}>有疾病需填寫</button>
+      </div>
+      {value.health.mode === 'declared' && (
+        <div className="mt-4">
+          <div className="grid gap-x-5 gap-y-2 sm:grid-cols-2">
+            {HEALTH_CONDITIONS.map((condition) => (
+              <label key={condition.id} className="flex cursor-pointer items-center gap-2 py-1 text-sm text-zinc-300">
+                <input
+                  type="checkbox"
+                  checked={value.health.conditions.includes(condition.id)}
+                  onChange={(event) => update((next) => {
+                    next.health.conditions = event.target.checked
+                      ? [...new Set([...next.health.conditions, condition.id])]
+                      : next.health.conditions.filter((id) => id !== condition.id);
+                  })}
+                  className="h-4 w-4 accent-orange-600"
+                />
+                {condition.label}
+              </label>
+            ))}
+          </div>
+          <div className="mt-3"><Field label="其他疾病"><input className={inputClass()} maxLength={80} value={value.health.other} onChange={(event) => update((next) => { next.health.other = event.target.value; })} /></Field></div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function DocumentAgreementPanel({ workerName, value, onChange, error }) {
   const [viewerId, setViewerId] = useState('');
   const [signatureOpen, setSignatureOpen] = useState(false);
@@ -862,38 +897,10 @@ function DocumentAgreementPanel({ workerName, value, onChange, error }) {
                     確認同意
                   </label>
                 </div>
+                {item.id === 'health' && <HealthSurvey value={value} update={update} />}
               </div>
             );
           })}
-        </div>
-        <div className="mt-5">
-          <h4 className="text-sm font-bold text-white">健康狀況調查</h4>
-          <div className="mt-3 grid grid-cols-2 rounded-lg border border-zinc-700 p-1 sm:w-[360px]">
-            <button type="button" onClick={() => update((next) => { next.health = { mode: 'none', conditions: [], other: '' }; })} className={`rounded-md px-3 py-2 text-sm font-bold ${value.health.mode === 'none' ? 'bg-emerald-600 text-white' : 'text-zinc-400'}`}>無上述疾病</button>
-            <button type="button" onClick={() => update((next) => { next.health.mode = 'declared'; })} className={`rounded-md px-3 py-2 text-sm font-bold ${value.health.mode === 'declared' ? 'bg-orange-600 text-white' : 'text-zinc-400'}`}>有疾病需填寫</button>
-          </div>
-          {value.health.mode === 'declared' && (
-            <div className="mt-4">
-              <div className="grid gap-x-5 gap-y-2 sm:grid-cols-2">
-                {HEALTH_CONDITIONS.map((condition) => (
-                  <label key={condition.id} className="flex cursor-pointer items-center gap-2 py-1 text-sm text-zinc-300">
-                    <input
-                      type="checkbox"
-                      checked={value.health.conditions.includes(condition.id)}
-                      onChange={(event) => update((next) => {
-                        next.health.conditions = event.target.checked
-                          ? [...new Set([...next.health.conditions, condition.id])]
-                          : next.health.conditions.filter((id) => id !== condition.id);
-                      })}
-                      className="h-4 w-4 accent-orange-600"
-                    />
-                    {condition.label}
-                  </label>
-                ))}
-              </div>
-              <div className="mt-3"><Field label="其他疾病"><input className={inputClass()} maxLength={80} value={value.health.other} onChange={(event) => update((next) => { next.health.other = event.target.value; })} /></Field></div>
-            </div>
-          )}
         </div>
         <div className="mt-5 flex flex-col gap-3 border-t border-zinc-800 pt-4 sm:flex-row sm:items-center sm:justify-between">
           <div>
@@ -1985,9 +1992,9 @@ function WorkersTab({ data, showToast, adminCall, refresh }) {
               <div className="truncate font-bold text-white">{worker.name}</div>
               <div className="truncate text-xs text-zinc-500">{worker.jobTitle} · {worker.companyLevelLabel || contractorLevelLabel(worker)} · {worker.contractorName}</div>
             </div>
-            <span className={`hidden shrink-0 items-center gap-1 text-xs font-semibold sm:flex ${worker.documentsComplete ? 'text-emerald-400' : 'text-amber-400'}`}>
+            <span className={`flex shrink-0 items-center gap-1 text-[11px] font-semibold sm:text-xs ${worker.documentsComplete ? 'text-emerald-400' : 'text-amber-400'}`}>
               {worker.documentsComplete ? <CheckCircle2 className="h-4 w-4" /> : <AlertTriangle className="h-4 w-4" />}
-              {worker.documentsComplete ? '文件完成' : '待補簽'}
+              {worker.documentsComplete ? '簽署完成' : '待補簽'}
             </span>
             <div className="hidden text-right text-xs text-zinc-600 sm:block">{worker.entryDate}</div>
             <ChevronRight className="h-4 w-4 shrink-0 text-zinc-700" />
@@ -2378,10 +2385,8 @@ function ReportsTab({ data, showToast, adminCall }) {
         }),
         mapWithConcurrency(workers, 4, async (worker) => {
           const packet = await adminCall('adminGetDocumentPacket', { id: worker.id });
-          if (!packet?.url) throw new Error(`「${worker.name}」的簽署文件讀取失敗`);
-          const response = await withTimeout(packet.url, { cache: 'no-store' }, 30000);
-          if (!response.ok) throw new Error(`「${worker.name}」的簽署文件下載失敗`);
-          const blob = await response.blob();
+          if (!packet?.dataUrl) throw new Error(`「${worker.name}」的簽署文件讀取失敗`);
+          const blob = dataUrlToBlob(packet.dataUrl);
           if (blob.size < 8) throw new Error(`「${worker.name}」的簽署文件內容不完整`);
           const hash = await crypto.subtle.digest('SHA-256', await blob.arrayBuffer());
           const actualHash = Array.from(new Uint8Array(hash), (value) => value.toString(16).padStart(2, '0')).join('');

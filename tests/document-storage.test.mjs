@@ -66,15 +66,20 @@ test('re-sign uses one atomic RPC and deletes new object on database failure', a
   assert.equal(calls.filter(({ options }) => options.method === 'DELETE').length, 1);
   assert.equal(calls.some(({ options }) => options.method === 'PATCH'), false);
 });
-test('download is restricted to active current template and a short-lived link', async () => {
+test('download is restricted to active current template and returned through the authorized API', async () => {
   let version = 'old';
+  const documentBytes = Buffer.from('%PDF-1.7\nworker packet');
+  const { createHash } = await import('node:crypto');
+  const sha256 = createHash('sha256').update(documentBytes).digest('hex');
   setup((url, options) => {
-    if (url.includes('/worker_document_packets?')) return Response.json([{ storage_path: 'c1/w1/p.pdf', template_version: version }]);
-    assert.equal(JSON.parse(options.body).expiresIn, 300);
-    return Response.json({ signedURL: '/storage/v1/object/sign/worker-documents/c1/w1/p.pdf?token=test' });
+    if (url.includes('/worker_document_packets?')) return Response.json([{ storage_path: 'c1/w1/p.pdf', template_version: version, sha256 }]);
+    assert.match(url, /\/storage\/v1\/object\/worker-documents\/c1\/w1\/p\.pdf$/);
+    assert.equal(options.method, 'GET');
+    return new Response(documentBytes, { headers: { 'Content-Type': 'application/pdf' } });
   });
   await assert.rejects(getWorkerDocumentPacketFromSupabase({ id: 'w1' }, owner), /文件版本/);
   version = 'worker-onboarding-v1';
   const result = await getWorkerDocumentPacketFromSupabase({ id: 'w1' }, owner);
-  assert.match(result.url, /^https:\/\/example.supabase.co\//);
+  assert.equal(result.dataUrl, `data:application/pdf;base64,${documentBytes.toString('base64')}`);
+  assert.equal(result.sha256, sha256);
 });

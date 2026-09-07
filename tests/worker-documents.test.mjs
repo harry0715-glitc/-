@@ -7,6 +7,7 @@ import {
   DOCUMENT_TEMPLATE_VERSION,
   createDocumentAcceptance,
   createEmptyDocumentState,
+  dataUrlToBlob,
   mergeRosterAndDocumentPackets,
   validateDocumentState,
 } from '../worker-documents.mjs';
@@ -55,6 +56,14 @@ test('acceptance metadata contains no health answers or reusable signature image
   assert.deepEqual(Object.keys(acceptance.documents), ['privacy', 'health', 'safety']);
   assert.equal(Object.hasOwn(acceptance, 'health'), false);
   assert.equal(Object.hasOwn(acceptance, 'signatureDataUrl'), false);
+});
+
+test('signed PDF data URL is decoded without a cross-origin fetch', async () => {
+  const source = Buffer.from('%PDF-1.7\ntest');
+  const blob = dataUrlToBlob(`data:application/pdf;base64,${source.toString('base64')}`);
+  assert.equal(blob.type, 'application/pdf');
+  assert.deepEqual(Buffer.from(await blob.arrayBuffer()), source);
+  assert.throws(() => dataUrlToBlob('data:text/plain;base64,dGVzdA=='), /格式不正確/);
 });
 
 test('roster PDF is followed by each complete three-page worker packet', async () => {

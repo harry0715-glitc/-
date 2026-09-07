@@ -190,6 +190,17 @@ export async function blobToDataUrl(blob) {
   return `data:${blob.type || 'application/octet-stream'};base64,${btoa(binary)}`;
 }
 
+export function dataUrlToBlob(dataUrl, expectedType = 'application/pdf') {
+  const match = String(dataUrl || '').match(/^data:([^;,]+);base64,([A-Za-z0-9+/=]+)$/);
+  if (!match || match[1].toLowerCase() !== expectedType.toLowerCase()) {
+    throw new Error('簽署文件回傳格式不正確');
+  }
+  const binary = atob(match[2]);
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
+  return new Blob([bytes], { type: match[1] });
+}
+
 async function loadTemplates() {
   if (!templatePromise) {
     templatePromise = Promise.all(WORKER_DOCUMENTS.map(async ({ pdfUrl }) => {

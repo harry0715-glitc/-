@@ -207,8 +207,14 @@ export async function supabaseDeletePhoto(path) {
 }
 
 export async function supabaseDownloadPhoto(path) {
+  return supabaseDownloadObject('worker-photos', path);
+}
+
+export async function supabaseDownloadObject(bucket, path) {
+  const bucketId = String(bucket || '').trim();
+  if (!bucketId) throw new SupabaseError('Supabase 儲存空間名稱不正確', 400, 'BUCKET_NAME');
   const result = await supabaseRequest(
-    `/storage/v1/object/worker-photos/${storagePath(path)}`,
+    `/storage/v1/object/${encodeURIComponent(bucketId)}/${storagePath(path)}`,
     { responseType: 'arrayBuffer' }
   );
   return {
