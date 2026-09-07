@@ -1,5 +1,5 @@
 export const PRIMARY_CONTRACTOR_LEGAL_NAME = '楓根室內裝修設計有限公司';
-export const DOCUMENT_TEMPLATE_VERSION = 'worker-onboarding-v2';
+export const DOCUMENT_TEMPLATE_VERSION = 'worker-onboarding-v3';
 
 export const WORKER_DOCUMENTS = Object.freeze([
   {
@@ -253,8 +253,8 @@ async function createOverlay(index, values) {
 
 async function drawPrivacyOverlay(context, values) {
   drawFittedText(context, values.serviceContractorName, 130, 748, 138, 11);
-  drawFittedText(context, values.worker.phone, 130, 774, 138, 11);
-  drawDateParts(context, values.signedAt, { yearX: 346, monthX: 394, dayX: 436, y: 774 });
+  drawFittedText(context, values.worker.phone, 130, 766, 138, 11);
+  drawDateParts(context, values.signedAt, { yearX: 346, monthX: 394, dayX: 436, y: 766 });
   await drawSignature(context, values.signatureDataUrl, 342, 711, 110, 35);
 }
 
