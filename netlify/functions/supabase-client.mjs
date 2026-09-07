@@ -260,6 +260,23 @@ export async function supabaseUploadObject(bucket, path, bytes, contentType) {
   return result.data;
 }
 
+export async function supabaseRpc(name, body) {
+  const result = await supabaseRequest(`/rest/v1/rpc/${encodeURIComponent(name)}`, {
+    method: 'POST', body,
+  });
+  return result.data;
+}
+
+export async function supabaseDeleteObject(bucket, path) {
+  const bucketId = String(bucket || '').trim();
+  const objectPath = String(path || '').trim();
+  if (!bucketId || !objectPath) return;
+  await supabaseRequest(`/storage/v1/object/${encodeURIComponent(bucketId)}`, {
+    method: 'DELETE',
+    body: { prefixes: [objectPath] },
+  });
+}
+
 export async function supabaseCreateSignedObjectUrl(bucket, path, expiresIn = 300) {
   const bucketId = String(bucket || '').trim();
   const result = await supabaseRequest(

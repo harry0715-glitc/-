@@ -6,3 +6,4 @@ dist/
 !.env.example
 .netlify/
 preview/
+test-output/

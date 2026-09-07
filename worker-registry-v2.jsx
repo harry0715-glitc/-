@@ -3,10 +3,12 @@ import {
   AlertTriangle,
   Archive,
   ArrowLeft,
+  BookOpen,
   Building2,
   CalendarDays,
   Camera,
   Check,
+  CheckCircle2,
   ChevronRight,
   ClipboardCopy,
   DatabaseBackup,
@@ -21,8 +23,10 @@ import {
   LockKeyhole,
   LogOut,
   Pencil,
+  PenLine,
   Plus,
   RefreshCw,
+  RotateCcw,
   Save,
   Search,
   Settings,
@@ -30,8 +34,20 @@ import {
   Trash2,
   UserPlus,
   Users,
+  ZoomIn,
+  ZoomOut,
   X
 } from 'lucide-react';
+import {
+  HEALTH_CONDITIONS,
+  WORKER_DOCUMENTS,
+  blobToDataUrl,
+  createDocumentAcceptance,
+  createEmptyDocumentState,
+  createWorkerDocumentPacket,
+  mergeRosterAndDocumentPackets,
+  validateDocumentState,
+} from './worker-documents.mjs';
 
 const PUBLIC_ENDPOINT = '/api/public';
 const ADMIN_ENDPOINT = '/api/admin';
@@ -213,7 +229,6 @@ const validateWorker = (form, hasPhoto, consentRequired) => {
   if (!form.contractorId) errors.contractorId = '請選擇所屬承包商';
   if (!form.entryDate) errors.entryDate = '請選擇進場日期';
   if (!hasPhoto) errors.photo = '請拍照或上傳照片';
-  if (consentRequired && !form.consent) errors.consent = '需確認個資蒐集與使用同意';
   return errors;
 };
 
@@ -461,7 +476,7 @@ function PhotoCropper({ src, onCancel, onDone, showToast }) {
   return (
     <div className="fixed inset-0 z-[60] flex flex-col bg-zinc-950">
       <header className="border-b border-zinc-800 px-4 pb-4 pt-[max(1rem,env(safe-area-inset-top))]">
-        <button onClick={onCancel} className="mb-3 flex items-center gap-1.5 text-sm text-zinc-400">
+        <button type="button" onClick={onCancel} className="mb-3 flex items-center gap-1.5 text-sm text-zinc-400">
           <ArrowLeft className="h-4 w-4" />
           取消
         </button>
@@ -522,7 +537,7 @@ function PhotoCropper({ src, onCancel, onDone, showToast }) {
       </div>
 
       <footer className="border-t border-zinc-800 bg-zinc-950 p-4 pb-[max(1rem,env(safe-area-inset-bottom))]">
-        <button onClick={finish} className="flex w-full items-center justify-center gap-2 rounded-lg bg-orange-600 px-4 py-3.5 font-bold text-white">
+        <button type="button" onClick={finish} className="flex w-full items-center justify-center gap-2 rounded-lg bg-orange-600 px-4 py-3.5 font-bold text-white">
           <Check className="h-5 w-5" />
           確認裁切
         </button>
@@ -644,6 +659,280 @@ function PhotoPicker({ preview, onPreview, onPhoto, onClear, canClear = true, er
   );
 }
 
+function DocumentViewerModal({ documentItem, onClose, onComplete }) {
+  const [zoom, setZoom] = useState(1);
+  useEffect(() => { setZoom(1); }, [documentItem?.id]);
+  if (!documentItem) return null;
+  return (
+    <div className="fixed inset-0 z-[90] flex flex-col bg-zinc-950" role="dialog" aria-modal="true" aria-label={documentItem.title}>
+      <header className="flex shrink-0 items-center gap-3 border-b border-zinc-800 bg-zinc-950 px-3 py-3 sm:px-5">
+        <button type="button" onClick={onClose} title="關閉文件" aria-label="關閉文件" className="rounded-lg p-2 text-zinc-400 hover:bg-zinc-900 hover:text-white">
+          <X className="h-5 w-5" />
+        </button>
+        <div className="min-w-0 flex-1">
+          <h2 className="truncate font-bold text-white">{documentItem.title}</h2>
+          <p className="text-xs text-zinc-500">請完整閱讀文件內容</p>
+        </div>
+        <button type="button" title="縮小文件" aria-label="縮小文件" disabled={zoom === 1} onClick={() => setZoom(Math.max(1, zoom - 0.5))} className="p-2 text-white disabled:text-zinc-600"><ZoomOut className="h-5 w-5" /></button>
+        <button type="button" title="放大文件" aria-label="放大文件" disabled={zoom === 3} onClick={() => setZoom(Math.min(3, zoom + 0.5))} className="p-2 text-white disabled:text-zinc-600"><ZoomIn className="h-5 w-5" /></button>
+      </header>
+      <div className="min-h-0 flex-1 overflow-auto bg-zinc-900 p-2 sm:p-5">
+        <img src={documentItem.previewUrl} alt={documentItem.title} style={{ width: `${zoom * 100}%`, maxWidth: `${850 * zoom}px` }} className="mx-auto block h-auto bg-white shadow-2xl" />
+      </div>
+      <footer className="shrink-0 border-t border-zinc-800 bg-zinc-950 p-3 sm:p-4">
+        <button type="button" onClick={onComplete} className="mx-auto flex w-full max-w-md items-center justify-center gap-2 rounded-lg bg-orange-600 px-5 py-3 font-bold text-white">
+          <CheckCircle2 className="h-5 w-5" />
+          完成閱讀並關閉
+        </button>
+      </footer>
+    </div>
+  );
+}
+
+function signatureFromCanvas(canvas) {
+  const context = canvas.getContext('2d');
+  const pixels = context.getImageData(0, 0, canvas.width, canvas.height);
+  let left = canvas.width;
+  let right = 0;
+  let top = canvas.height;
+  let bottom = 0;
+  for (let y = 0; y < canvas.height; y += 1) {
+    for (let x = 0; x < canvas.width; x += 1) {
+      if (pixels.data[(y * canvas.width + x) * 4 + 3] > 20) {
+        left = Math.min(left, x);
+        right = Math.max(right, x);
+        top = Math.min(top, y);
+        bottom = Math.max(bottom, y);
+      }
+    }
+  }
+  if (left > right || top > bottom) return '';
+  const padding = 12;
+  const output = document.createElement('canvas');
+  output.width = right - left + 1 + padding * 2;
+  output.height = bottom - top + 1 + padding * 2;
+  output.getContext('2d').drawImage(
+    canvas,
+    left,
+    top,
+    right - left + 1,
+    bottom - top + 1,
+    padding,
+    padding,
+    right - left + 1,
+    bottom - top + 1,
+  );
+  return output.toDataURL('image/png');
+}
+
+function SignatureModal({ workerName, onClose, onConfirm }) {
+  const canvasRef = useRef(null);
+  const drawingRef = useRef(false);
+  const lastPointRef = useRef(null);
+  const [hasInk, setHasInk] = useState(false);
+  const point = (event) => {
+    const canvas = canvasRef.current;
+    const rect = canvas.getBoundingClientRect();
+    return {
+      x: (event.clientX - rect.left) * canvas.width / rect.width,
+      y: (event.clientY - rect.top) * canvas.height / rect.height,
+    };
+  };
+  const start = (event) => {
+    canvasRef.current.setPointerCapture(event.pointerId);
+    drawingRef.current = true;
+    lastPointRef.current = point(event);
+  };
+  const move = (event) => {
+    if (!drawingRef.current) return;
+    const context = canvasRef.current.getContext('2d');
+    const next = point(event);
+    const previous = lastPointRef.current || next;
+    context.strokeStyle = '#111111';
+    context.lineWidth = 6;
+    context.lineCap = 'round';
+    context.lineJoin = 'round';
+    context.beginPath();
+    context.moveTo(previous.x, previous.y);
+    context.lineTo(next.x, next.y);
+    context.stroke();
+    lastPointRef.current = next;
+    setHasInk(true);
+  };
+  const end = () => {
+    drawingRef.current = false;
+    lastPointRef.current = null;
+  };
+  const clear = () => {
+    const canvas = canvasRef.current;
+    canvas.getContext('2d').clearRect(0, 0, canvas.width, canvas.height);
+    setHasInk(false);
+  };
+  return (
+    <div className="fixed inset-0 z-[95] flex items-center justify-center bg-black/85 p-4" role="dialog" aria-modal="true" aria-label="手寫簽名">
+      <div className="w-full max-w-2xl rounded-lg border border-zinc-700 bg-zinc-950 p-4 shadow-2xl sm:p-5">
+        <div className="flex items-start justify-between gap-3">
+          <div>
+            <h2 className="text-lg font-black text-white">本人手寫簽名</h2>
+            <p className="mt-1 text-sm text-zinc-400">簽署人：{workerName || '請先填寫姓名'}</p>
+          </div>
+          <button type="button" onClick={onClose} title="關閉" aria-label="關閉" className="rounded-lg p-2 text-zinc-500 hover:bg-zinc-900 hover:text-white"><X className="h-5 w-5" /></button>
+        </div>
+        <canvas
+          ref={canvasRef}
+          width="900"
+          height="280"
+          onPointerDown={start}
+          onPointerMove={move}
+          onPointerUp={end}
+          onPointerCancel={end}
+          onPointerLeave={end}
+          className="mt-4 block aspect-[45/14] w-full touch-none rounded-lg bg-white"
+        />
+        <p className="mt-2 text-xs leading-5 text-zinc-500">本人確認填寫資料與健康聲明屬實，並同意簽署以上三份文件。</p>
+        <div className="mt-4 flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
+          <button type="button" onClick={clear} className="flex items-center justify-center gap-2 rounded-lg border border-zinc-700 px-4 py-3 font-semibold text-zinc-300"><RotateCcw className="h-4 w-4" />清除重簽</button>
+          <button
+            type="button"
+            disabled={!hasInk || !workerName}
+            onClick={() => {
+              const dataUrl = signatureFromCanvas(canvasRef.current);
+              if (dataUrl) onConfirm(dataUrl, new Date().toISOString());
+            }}
+            className="flex items-center justify-center gap-2 rounded-lg bg-orange-600 px-5 py-3 font-bold text-white disabled:bg-zinc-700 disabled:text-zinc-400"
+          >
+            <Check className="h-5 w-5" />確認簽名
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function DocumentAgreementPanel({ workerName, value, onChange, error }) {
+  const [viewerId, setViewerId] = useState('');
+  const [signatureOpen, setSignatureOpen] = useState(false);
+  const viewer = WORKER_DOCUMENTS.find((item) => item.id === viewerId);
+  const update = (recipe, invalidateSignature = true) => {
+    const next = {
+      ...value,
+      documents: Object.fromEntries(Object.entries(value.documents).map(([id, item]) => [id, { ...item }])),
+      health: { ...value.health, conditions: [...(value.health.conditions || [])] },
+    };
+    recipe(next);
+    if (invalidateSignature) {
+      next.signatureDataUrl = '';
+      next.signedAt = '';
+    }
+    onChange(next);
+  };
+  const allAccepted = WORKER_DOCUMENTS.every(({ id }) => value.documents[id]?.accepted);
+  return (
+    <>
+      <section className={`rounded-lg border bg-zinc-950 p-4 ${error ? 'border-red-500' : 'border-zinc-800'}`}>
+        <div className="flex items-start gap-3">
+          <FileText className="mt-0.5 h-5 w-5 shrink-0 text-orange-400" />
+          <div>
+            <h3 className="font-bold text-white">進場文件閱讀與簽署</h3>
+            <p className="mt-1 text-xs leading-5 text-zinc-500">三份文件皆須完成閱讀、確認並由本人簽名。</p>
+          </div>
+        </div>
+        <div className="mt-4 divide-y divide-zinc-800 border-y border-zinc-800">
+          {WORKER_DOCUMENTS.map((item) => {
+            const documentValue = value.documents[item.id];
+            return (
+              <div key={item.id} className="grid gap-3 py-3 sm:grid-cols-[1fr_auto] sm:items-center">
+                <div>
+                  <div className="text-sm font-semibold text-zinc-200">{item.title}</div>
+                  <div className={`mt-1 text-xs ${documentValue.viewedAt ? 'text-emerald-400' : 'text-zinc-600'}`}>{documentValue.viewedAt ? '已完成閱讀' : '尚未閱讀'}</div>
+                </div>
+                <div className="flex flex-wrap items-center gap-3">
+                  <button type="button" onClick={() => setViewerId(item.id)} className="flex items-center gap-2 rounded-lg border border-zinc-700 px-3 py-2 text-sm font-semibold text-zinc-300"><BookOpen className="h-4 w-4" />查看文件</button>
+                  <label className={`flex items-center gap-2 text-sm font-semibold ${documentValue.viewedAt ? 'cursor-pointer text-zinc-200' : 'cursor-not-allowed text-zinc-600'}`}>
+                    <input
+                      type="checkbox"
+                      disabled={!documentValue.viewedAt}
+                      checked={documentValue.accepted}
+                      onChange={(event) => update((next) => {
+                        next.documents[item.id].accepted = event.target.checked;
+                        next.documents[item.id].acceptedAt = event.target.checked ? new Date().toISOString() : '';
+                      })}
+                      className="h-5 w-5 accent-orange-600"
+                    />
+                    確認同意
+                  </label>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+        <div className="mt-5">
+          <h4 className="text-sm font-bold text-white">健康狀況調查</h4>
+          <div className="mt-3 grid grid-cols-2 rounded-lg border border-zinc-700 p-1 sm:w-[360px]">
+            <button type="button" onClick={() => update((next) => { next.health = { mode: 'none', conditions: [], other: '' }; })} className={`rounded-md px-3 py-2 text-sm font-bold ${value.health.mode === 'none' ? 'bg-emerald-600 text-white' : 'text-zinc-400'}`}>無上述疾病</button>
+            <button type="button" onClick={() => update((next) => { next.health.mode = 'declared'; })} className={`rounded-md px-3 py-2 text-sm font-bold ${value.health.mode === 'declared' ? 'bg-orange-600 text-white' : 'text-zinc-400'}`}>有疾病需填寫</button>
+          </div>
+          {value.health.mode === 'declared' && (
+            <div className="mt-4">
+              <div className="grid gap-x-5 gap-y-2 sm:grid-cols-2">
+                {HEALTH_CONDITIONS.map((condition) => (
+                  <label key={condition.id} className="flex cursor-pointer items-center gap-2 py-1 text-sm text-zinc-300">
+                    <input
+                      type="checkbox"
+                      checked={value.health.conditions.includes(condition.id)}
+                      onChange={(event) => update((next) => {
+                        next.health.conditions = event.target.checked
+                          ? [...new Set([...next.health.conditions, condition.id])]
+                          : next.health.conditions.filter((id) => id !== condition.id);
+                      })}
+                      className="h-4 w-4 accent-orange-600"
+                    />
+                    {condition.label}
+                  </label>
+                ))}
+              </div>
+              <div className="mt-3"><Field label="其他疾病"><input className={inputClass()} maxLength={80} value={value.health.other} onChange={(event) => update((next) => { next.health.other = event.target.value; })} /></Field></div>
+            </div>
+          )}
+        </div>
+        <div className="mt-5 flex flex-col gap-3 border-t border-zinc-800 pt-4 sm:flex-row sm:items-center sm:justify-between">
+          <div>
+            <div className="text-sm font-bold text-white">本人手寫簽名</div>
+            <div className={`mt-1 text-xs ${value.signedAt ? 'text-emerald-400' : 'text-zinc-600'}`}>{value.signedAt ? `已由 ${workerName} 簽署` : '尚未簽署'}</div>
+          </div>
+          <button type="button" disabled={!allAccepted || !workerName} onClick={() => setSignatureOpen(true)} className="flex items-center justify-center gap-2 rounded-lg bg-orange-600 px-4 py-3 font-bold text-white disabled:bg-zinc-800 disabled:text-zinc-600">
+            <PenLine className="h-5 w-5" />{value.signedAt ? '重新簽名' : '開始簽名'}
+          </button>
+        </div>
+        {error && <p className="mt-3 flex items-center gap-1 text-xs text-red-400"><AlertTriangle className="h-3.5 w-3.5" />{error}</p>}
+      </section>
+      <DocumentViewerModal
+        documentItem={viewer}
+        onClose={() => setViewerId('')}
+        onComplete={() => {
+          update((next) => {
+            if (!next.documents[viewerId].viewedAt) next.documents[viewerId].viewedAt = new Date().toISOString();
+          }, false);
+          setViewerId('');
+        }}
+      />
+      {signatureOpen && (
+        <SignatureModal
+          workerName={workerName}
+          onClose={() => setSignatureOpen(false)}
+          onConfirm={(signatureDataUrl, signedAt) => {
+            update((next) => {
+              next.signatureDataUrl = signatureDataUrl;
+              next.signedAt = signedAt;
+            }, false);
+            setSignatureOpen(false);
+          }}
+        />
+      )}
+    </>
+  );
+}
+
 function WorkerForm({
   initial,
   contractors,
@@ -661,6 +950,8 @@ function WorkerForm({
   const [newPhoto, setNewPhoto] = useState('');
   const [preview, setPreview] = useState(initialPhoto);
   const [errors, setErrors] = useState({});
+  const [documentState, setDocumentState] = useState(createEmptyDocumentState);
+  const [preparing, setPreparing] = useState(false);
   const formRef = useRef(null);
 
   useEffect(() => {
@@ -670,6 +961,11 @@ function WorkerForm({
   const setValue = (key, value) => {
     setForm((current) => ({ ...current, [key]: value }));
     setErrors((current) => ({ ...current, [key]: undefined }));
+    if (consentRequired && ['name', 'phone', 'jobTitle', 'contractorId'].includes(key)) {
+      setDocumentState((current) => current.signatureDataUrl
+        ? { ...current, signatureDataUrl: '', signedAt: '' }
+        : current);
+    }
   };
 
   const submit = async (event) => {
@@ -684,6 +980,10 @@ function WorkerForm({
       Boolean(newPhoto || existingPhoto),
       consentRequired
     );
+    if (consentRequired) {
+      const documentError = validateDocumentState(documentState);
+      if (documentError) nextErrors.documents = documentError;
+    }
     setErrors(nextErrors);
     if (Object.keys(nextErrors).length) {
       requestAnimationFrame(() => {
@@ -692,7 +992,27 @@ function WorkerForm({
       showToast('尚有必填資料未完成', 'error');
       return;
     }
-    await onSubmit({ ...normalized, photo: newPhoto || undefined });
+    setPreparing(true);
+    try {
+      const payload = { ...normalized, photo: newPhoto || undefined };
+      if (consentRequired) {
+        const contractor = contractors.find((item) => item.id === normalized.contractorId);
+        const packet = await createWorkerDocumentPacket({
+          worker: normalized,
+          contractorName: contractor?.name,
+          contractorCompanyType: contractor?.companyType,
+          documentState,
+        });
+        payload.consent = true;
+        payload.documentPacket = await blobToDataUrl(packet);
+        payload.documentAcceptance = createDocumentAcceptance(documentState);
+      }
+      await onSubmit(payload);
+    } catch (error) {
+      showToast(`文件產生失敗：${error.message}`, 'error');
+    } finally {
+      setPreparing(false);
+    }
   };
 
   const invalid = (key) => Boolean(errors[key]);
@@ -830,19 +1150,15 @@ function WorkerForm({
       </section>
 
       {consentRequired && (
-        <label className={`flex cursor-pointer items-start gap-3 rounded-lg border p-4 ${errors.consent ? 'border-red-500 bg-red-950/20' : 'border-zinc-800 bg-zinc-950'}`}>
-          <input
-            aria-invalid={invalid('consent')}
-            type="checkbox"
-            className="mt-0.5 h-5 w-5 accent-orange-600"
-            checked={form.consent}
-            onChange={(event) => setValue('consent', event.target.checked)}
-          />
-          <span className="text-sm leading-6 text-zinc-300">
-            已確認當事人同意蒐集並使用本表中的身分、聯絡、緊急聯絡、血型及照片資料。
-            {errors.consent && <span className="mt-1 block text-xs text-red-400">{errors.consent}</span>}
-          </span>
-        </label>
+        <DocumentAgreementPanel
+          workerName={form.name.trim()}
+          value={documentState}
+          error={errors.documents}
+          onChange={(value) => {
+            setDocumentState(value);
+            setErrors((current) => ({ ...current, documents: undefined }));
+          }}
+        />
       )}
 
       <div className="flex flex-col-reverse gap-2 border-t border-zinc-800 pt-4 sm:flex-row sm:justify-end">
@@ -853,14 +1169,66 @@ function WorkerForm({
         )}
         <button
           type="submit"
-          disabled={saving}
+          disabled={saving || preparing}
           className="flex items-center justify-center gap-2 rounded-lg bg-orange-600 px-5 py-3 font-bold text-white disabled:cursor-not-allowed disabled:bg-zinc-700 disabled:text-zinc-400"
         >
-          {saving ? <LoaderCircle className="h-5 w-5 animate-spin" /> : <Save className="h-5 w-5" />}
-          {saving ? '儲存中' : submitLabel}
+          {saving || preparing ? <LoaderCircle className="h-5 w-5 animate-spin" /> : <Save className="h-5 w-5" />}
+          {preparing ? '產生簽署文件中' : saving ? '儲存中' : submitLabel}
         </button>
       </div>
     </form>
+  );
+}
+
+function WorkerDocumentSigningView({ worker, contractor, saving, onCancel, onSubmit, showToast }) {
+  const [documentState, setDocumentState] = useState(createEmptyDocumentState);
+  const [error, setError] = useState('');
+  const [preparing, setPreparing] = useState(false);
+  const submit = async () => {
+    const validationError = validateDocumentState(documentState);
+    setError(validationError);
+    if (validationError) {
+      showToast(validationError, 'error');
+      return;
+    }
+    setPreparing(true);
+    try {
+      const packet = await createWorkerDocumentPacket({
+        worker,
+        contractorName: contractor?.name || worker.contractorName,
+        contractorCompanyType: contractor?.companyType || worker.companyType,
+        documentState,
+      });
+      await onSubmit({
+        id: worker.id,
+        expectedUpdatedAt: worker.updatedAt,
+        documentPacket: await blobToDataUrl(packet),
+        documentAcceptance: createDocumentAcceptance(documentState),
+      });
+    } catch (submitError) {
+      showToast(`文件儲存失敗：${submitError.message}`, 'error');
+    } finally {
+      setPreparing(false);
+    }
+  };
+  return (
+    <div>
+      <div className="mb-5 flex items-center gap-3">
+        <button type="button" onClick={onCancel} title="返回人員資料" className="rounded-lg p-2 text-zinc-400 hover:bg-zinc-900"><ArrowLeft className="h-5 w-5" /></button>
+        <div>
+          <h2 className="text-xl font-black text-white">{worker.documentsComplete ? '重新簽署進場文件' : '補簽進場文件'}</h2>
+          <p className="mt-1 text-xs text-zinc-500">{worker.name} · {worker.contractorName}</p>
+        </div>
+      </div>
+      <DocumentAgreementPanel workerName={worker.name} value={documentState} onChange={(value) => { setDocumentState(value); setError(''); }} error={error} />
+      <div className="mt-4 flex flex-col-reverse gap-2 border-t border-zinc-800 pt-4 sm:flex-row sm:justify-end">
+        <button type="button" onClick={onCancel} className="rounded-lg border border-zinc-700 px-5 py-3 font-semibold text-zinc-300">取消</button>
+        <button type="button" onClick={submit} disabled={saving || preparing} className="flex items-center justify-center gap-2 rounded-lg bg-orange-600 px-5 py-3 font-bold text-white disabled:bg-zinc-700">
+          {saving || preparing ? <LoaderCircle className="h-5 w-5 animate-spin" /> : <Save className="h-5 w-5" />}
+          {preparing ? '產生簽署文件中' : saving ? '儲存中' : '儲存三份文件'}
+        </button>
+      </div>
+    </div>
   );
 }
 
@@ -1369,6 +1737,7 @@ function WorkersTab({ data, showToast, adminCall, refresh }) {
   const [contractorFilter, setContractorFilter] = useState('');
   const [selected, setSelected] = useState(null);
   const [editing, setEditing] = useState(null);
+  const [signing, setSigning] = useState(null);
   const [photo, setPhoto] = useState('');
   const [photoLoading, setPhotoLoading] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -1406,6 +1775,31 @@ function WorkersTab({ data, showToast, adminCall, refresh }) {
     return () => { active = false; };
   }, [adminCall, selected?.id, selected?.hasPhoto, showToast]);
 
+  if (signing) {
+    const contractor = data.contractors.find((item) => item.id === signing.contractorId);
+    return (
+      <WorkerDocumentSigningView
+        worker={signing}
+        contractor={contractor}
+        saving={saving}
+        showToast={showToast}
+        onCancel={() => setSigning(null)}
+        onSubmit={async (payload) => {
+          setSaving(true);
+          try {
+            await adminCall('adminSaveWorkerDocuments', payload);
+            setSigning(null);
+            setSelected(null);
+            showToast('三份簽署文件已安全保存');
+            await refresh();
+          } finally {
+            setSaving(false);
+          }
+        }}
+      />
+    );
+  }
+
   if (editing) {
     const isNew = editing === 'new';
     const initial = isNew
@@ -1436,13 +1830,17 @@ function WorkersTab({ data, showToast, adminCall, refresh }) {
           onSubmit={async (payload) => {
             setSaving(true);
             try {
-              await adminCall(
+              const result = await adminCall(
                 isNew ? 'adminAddWorker' : 'adminUpdateWorker',
                 isNew ? payload : { ...payload, id: editing.id }
               );
               setEditing(null);
               setSelected(null);
-              showToast(isNew ? '人員已新增' : '人員資料已更新');
+              showToast(isNew
+                ? '人員與三份簽署文件已新增'
+                : result?.documentsInvalidated
+                  ? '人員資料已更新，因簽署內容有變更，請重新簽署三份文件'
+                  : '人員資料已更新');
               void refresh().catch((error) => {
                 showToast(`清單更新失敗：${error.message}`, 'error');
               });
@@ -1468,6 +1866,7 @@ function WorkersTab({ data, showToast, adminCall, refresh }) {
       ['公司層級', selected.companyLevelLabel || contractorLevelLabel(selected)],
       ['所屬公司', selected.contractorName],
       ['進場日期', selected.entryDate],
+      ['進場文件', selected.documentsComplete ? `已完成（${formatDateTime(selected.documentsCompletedAt)}）` : '尚未完成'],
       ['備註', selected.notes || '—'],
       ['登記時間', formatDateTime(selected.createdAt)],
       ['最後更新', formatDateTime(selected.updatedAt)]
@@ -1491,6 +1890,13 @@ function WorkersTab({ data, showToast, adminCall, refresh }) {
                 <p className="mt-1 text-sm text-orange-400">{selected.jobTitle}</p>
               </div>
               <div className="flex gap-2">
+                <button
+                  onClick={() => setSigning(selected)}
+                  className={`flex items-center gap-2 rounded-lg border px-4 py-2.5 text-sm font-bold ${selected.documentsComplete ? 'border-zinc-700 text-zinc-300' : 'border-cyan-700 text-cyan-300'}`}
+                >
+                  <PenLine className="h-4 w-4" />
+                  {selected.documentsComplete ? '重新簽署' : '補簽文件'}
+                </button>
                 <button onClick={() => setEditing(selected)} className="flex items-center gap-2 rounded-lg bg-orange-600 px-4 py-2.5 text-sm font-bold text-white">
                   <Pencil className="h-4 w-4" />
                   修改
@@ -1579,6 +1985,10 @@ function WorkersTab({ data, showToast, adminCall, refresh }) {
               <div className="truncate font-bold text-white">{worker.name}</div>
               <div className="truncate text-xs text-zinc-500">{worker.jobTitle} · {worker.companyLevelLabel || contractorLevelLabel(worker)} · {worker.contractorName}</div>
             </div>
+            <span className={`hidden shrink-0 items-center gap-1 text-xs font-semibold sm:flex ${worker.documentsComplete ? 'text-emerald-400' : 'text-amber-400'}`}>
+              {worker.documentsComplete ? <CheckCircle2 className="h-4 w-4" /> : <AlertTriangle className="h-4 w-4" />}
+              {worker.documentsComplete ? '文件完成' : '待補簽'}
+            </span>
             <div className="hidden text-right text-xs text-zinc-600 sm:block">{worker.entryDate}</div>
             <ChevronRight className="h-4 w-4 shrink-0 text-zinc-700" />
           </button>
@@ -1954,11 +2364,31 @@ function ReportsTab({ data, showToast, adminCall }) {
           || String(left.contractorName).localeCompare(String(right.contractorName), 'zh-Hant')
           || String(left.name).localeCompare(String(right.name), 'zh-Hant')
         ));
-      const photos = await mapWithConcurrency(workers, 4, async (worker) => {
-        const photo = await adminCall('adminGetPhoto', { id: worker.id });
-        if (!photo?.dataUrl) throw new Error(`「${worker.name}」的照片讀取失敗，請重新上傳照片`);
-        return photo.dataUrl;
-      });
+      const missingDocuments = workers.filter((worker) => !worker.documentsComplete);
+      if (missingDocuments.length) {
+        const names = missingDocuments.slice(0, 5).map((worker) => worker.name).join('、');
+        const remaining = missingDocuments.length > 5 ? `等 ${missingDocuments.length} 人` : '';
+        throw new Error(`請先完成簽署文件：${names}${remaining}`);
+      }
+      const [photos, documentPackets] = await Promise.all([
+        mapWithConcurrency(workers, 4, async (worker) => {
+          const photo = await adminCall('adminGetPhoto', { id: worker.id });
+          if (!photo?.dataUrl) throw new Error(`「${worker.name}」的照片讀取失敗，請重新上傳照片`);
+          return photo.dataUrl;
+        }),
+        mapWithConcurrency(workers, 4, async (worker) => {
+          const packet = await adminCall('adminGetDocumentPacket', { id: worker.id });
+          if (!packet?.url) throw new Error(`「${worker.name}」的簽署文件讀取失敗`);
+          const response = await withTimeout(packet.url, { cache: 'no-store' }, 30000);
+          if (!response.ok) throw new Error(`「${worker.name}」的簽署文件下載失敗`);
+          const blob = await response.blob();
+          if (blob.size < 8) throw new Error(`「${worker.name}」的簽署文件內容不完整`);
+          const hash = await crypto.subtle.digest('SHA-256', await blob.arrayBuffer());
+          const actualHash = Array.from(new Uint8Array(hash), (value) => value.toString(16).padStart(2, '0')).join('');
+          if (actualHash !== packet.sha256) throw new Error(`「${worker.name}」的簽署文件驗證失敗，已停止匯出`);
+          return blob;
+        }),
+      ]);
       const scopeLabel = type === 'daily'
         ? (owner ? '全部公司（含主承包商與次承包商）' : `次承包商：${data.profile.contractorName}`)
         : (selectedContractor?.companyType === 'primary'
@@ -1970,7 +2400,7 @@ function ReportsTab({ data, showToast, adminCall }) {
         : `公司完整名冊_${selectedContractor?.name || data.profile.contractorName}`;
       const filename = `${data.primaryContractor?.name || '主承包商'}_施工人員名冊_${filenameLabel}.pdf`;
       const { createRosterPdf } = await import('./client-pdf.mjs');
-      const blob = await createRosterPdf({
+      const rosterBlob = await createRosterPdf({
         primaryContractorName: data.primaryContractor?.name,
         reportName,
         scopeLabel,
@@ -1978,6 +2408,7 @@ function ReportsTab({ data, showToast, adminCall }) {
         workers,
         photos
       });
+      const blob = await mergeRosterAndDocumentPackets(rosterBlob, documentPackets);
       const report = {
         filename,
         url: URL.createObjectURL(blob),

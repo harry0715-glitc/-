@@ -91,6 +91,18 @@ test('Supabase admin data preserves contractor scoping and existing field names'
         },
       ]), { status: 200 });
     }
+    if (text.includes('/worker_document_packets?')) {
+      assert.match(text, /contractor_id=eq\.sub-1/);
+      return new Response(JSON.stringify([
+        {
+          id: 'packet-1',
+          worker_id: 'worker-1',
+          template_version: 'worker-onboarding-v1',
+          signed_at: '2026-08-01T00:00:00.000Z',
+          status: 'active',
+        },
+      ]), { status: 200 });
+    }
     throw new Error(`Unexpected request: ${text}`);
   };
 
@@ -109,6 +121,8 @@ test('Supabase admin data preserves contractor scoping and existing field names'
   assert.deepEqual(result.contractors.map((item) => item.id), ['sub-1']);
   assert.equal(result.workers[0].idNumber, 'A123456789');
   assert.equal(result.workers[0].hasPhoto, true);
+  assert.equal(result.workers[0].documentsComplete, true);
+  assert.equal(result.workers[0].documentTemplateVersion, 'worker-onboarding-v1');
 });
 
 test('Supabase adds a contractor directly without calling Apps Script', async () => {
@@ -321,6 +335,23 @@ test('Supabase backup snapshots current roster data without password hashes', as
     if (text.includes('/rest/v1/audit_logs?')) {
       return new Response(JSON.stringify([]), { status: 200 });
     }
+    if (text.includes('/rest/v1/worker_document_packets?')) {
+      return new Response(JSON.stringify([
+        {
+          id: 'packet-1',
+          worker_id: 'worker-1',
+          contractor_id: 'main-1',
+          storage_path: 'main-1/worker-1/packet-1.pdf',
+          sha256: 'a'.repeat(64),
+          template_version: 'worker-onboarding-v1',
+          signer_name: '王小明',
+          signed_at: '2026-08-01T00:00:00.000Z',
+          status: 'active',
+          created_at: '2026-08-01T00:00:00.000Z',
+          superseded_at: null,
+        },
+      ]), { status: 200 });
+    }
     if (text.endsWith('/storage/v1/bucket')) {
       return new Response('{}', { status: 200 });
     }
@@ -335,11 +366,12 @@ test('Supabase backup snapshots current roster data without password hashes', as
 
   const result = await createSupabaseBackup({ id: 'owner-1', role: 'owner' });
   assert.equal(result.source, 'supabase');
-  assert.deepEqual(result.counts, { contractors: 1, workers: 1, managers: 1, auditLogs: 0 });
+  assert.deepEqual(result.counts, { contractors: 1, workers: 1, managers: 1, auditLogs: 0, documentPackets: 1 });
   assert.match(result.url, /^https:\/\/example\.supabase\.co\//);
 
   const upload = requests.find((request) => request.url.includes('/storage/v1/object/registry-backups/'));
   const snapshot = JSON.parse(Buffer.from(upload.body).toString('utf8'));
   assert.equal(snapshot.workers[0].name, '王小明');
+  assert.equal(snapshot.documentPackets[0].storage_path, 'main-1/worker-1/packet-1.pdf');
   assert.equal(Object.hasOwn(snapshot.managers[0], 'password_hash'), false);
 });

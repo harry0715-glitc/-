@@ -1,7 +1,8 @@
 const CONFIG_TIMEOUT_MS = 15_000;
 const SUBMISSION_TIMEOUT_MS = 30_000;
-const MAX_REQUEST_BYTES = 8_500_000;
-const MAX_PHOTO_CHARACTERS = 8_100_000;
+const MAX_REQUEST_BYTES = 5_800_000;
+const MAX_PHOTO_CHARACTERS = 2_100_000;
+const MAX_DOCUMENT_PACKET_CHARACTERS = 3_400_000;
 const HTTP_PROTOCOLS = new Set(["http:", "https:"]);
 const ALLOWED_ACTIONS = new Set(["getPublicConfig", "submitRegistration"]);
 
@@ -50,6 +51,11 @@ export default async function publicApi(request) {
     && (typeof payload.photo !== "string" || payload.photo.length > MAX_PHOTO_CHARACTERS)) {
     return jsonResponse(413, { ok: false, error: "照片為必填，且檔案不可過大" });
   }
+  if (body.action === "submitRegistration"
+    && (typeof payload.documentPacket !== "string"
+      || payload.documentPacket.length > MAX_DOCUMENT_PACKET_CHARACTERS)) {
+    return jsonResponse(413, { ok: false, error: "三份簽署文件為必填，且檔案不可過大" });
+  }
 
   if (isSupabaseEnabled()) {
     try {
@@ -70,6 +76,10 @@ export default async function publicApi(request) {
       const status = error instanceof SupabaseError && error.status === 504 ? 504 : 502;
       return jsonResponse(status, { ok: false, error: "資料服務暫時無法連線" });
     }
+  }
+
+  if (body.action === "submitRegistration") {
+    return jsonResponse(503, { ok: false, error: "簽署文件服務尚未完成設定" });
   }
 
   const appsScriptUrl = requiredEnv("APPS_SCRIPT_URL");
@@ -117,7 +127,12 @@ function safePublicError(message) {
     /檔案過大/,
     /已有在冊資料/,
     /不存在或已停用/,
-    /個資蒐集與使用同意/
+    /個資蒐集與使用同意/,
+    /三份文件/,
+    /簽署文件/,
+    /文件版本/,
+    /文件閱讀/,
+    /簽署時間/,
   ];
   return allowed.some(pattern => pattern.test(message))
     ? message

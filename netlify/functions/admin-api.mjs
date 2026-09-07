@@ -9,8 +9,10 @@ import {
   deleteWorkerInSupabase,
   getAdminDataFromSupabase,
   getManagerBySession,
+  getWorkerDocumentPacketFromSupabase,
   getWorkerPhotoFromSupabase,
   managerProfileFromSession,
+  saveWorkerDocumentsInSupabase,
   syncBundleToSupabase,
   syncActionResultToSupabase,
   syncManagerFromLogin,
@@ -34,6 +36,8 @@ const SUPABASE_FAST_ACTIONS = new Set([
   "adminUpdateWorker",
   "adminDeleteWorker",
   "adminGetPhoto",
+  "adminGetDocumentPacket",
+  "adminSaveWorkerDocuments",
   "adminCreateBackup",
 ]);
 const SUPABASE_MIRROR_ACTIONS = new Set([
@@ -278,6 +282,10 @@ async function handler(event) {
         if (result.legacy) {
           result = null;
         }
+      } else if (request.action === "adminGetDocumentPacket") {
+        result = await getWorkerDocumentPacketFromSupabase(payload, supabaseActor);
+      } else if (request.action === "adminSaveWorkerDocuments") {
+        result = await saveWorkerDocumentsInSupabase(payload, supabaseActor);
       } else if (request.action === "adminCreateBackup") {
         result = await createSupabaseBackup(supabaseActor);
       }

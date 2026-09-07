@@ -1,13 +1,18 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
+
+import { PDFDocument } from 'pdf-lib';
 
 import {
   SupabaseError,
   isSupabaseConfigured,
   supabaseCreateSignedObjectUrl,
+  supabaseDelete,
+  supabaseDeleteObject,
   supabaseDeletePhoto,
   supabaseDownloadPhoto,
   supabaseEnsurePrivateBucket,
   supabaseInsert,
+  supabaseRpc,
   supabaseSelect,
   supabaseUpdate,
   supabaseUploadObject,
@@ -17,6 +22,11 @@ import {
 
 const MAX_PHOTO_CHARACTERS = 8_100_000;
 const MAX_PREVIEW_BYTES = 2_500_000;
+const DOCUMENT_BUCKET = 'worker-documents';
+const DOCUMENT_PACKET_MAX_BYTES = 2_500_000;
+const DOCUMENT_PACKET_MAX_CHARACTERS = 3_400_000;
+const DOCUMENT_LINK_TTL_SECONDS = 5 * 60;
+const DOCUMENT_TEMPLATE_VERSION = 'worker-onboarding-v1';
 const BACKUP_BUCKET = 'registry-backups';
 const MAX_BACKUP_BYTES = 25_000_000;
 const BACKUP_LINK_TTL_SECONDS = 10 * 60;
@@ -101,8 +111,10 @@ export async function syncManagerFromLogin(profile, sessionVersion) {
 export async function getAdminDataFromSupabase(actor) {
   const owner = actor.role === 'owner';
   const workerParams = { status: 'eq.active', order: 'created_at.desc' };
+  const packetParams = { status: 'eq.active', order: 'created_at.desc' };
   if (!owner) workerParams.contractor_id = `eq.${actor.contractorId}`;
-  const [contractorRows, workerRows, managerRows] = await Promise.all([
+  if (!owner) packetParams.contractor_id = `eq.${actor.contractorId}`;
+  const [contractorRows, workerRows, managerRows, packetRows] = await Promise.all([
     supabaseSelect('contractors', {
       select: 'id,name,company_type,status,created_at',
       status: 'eq.active',
@@ -119,10 +131,23 @@ export async function getAdminDataFromSupabase(actor) {
         order: 'created_at.desc',
       })
       : Promise.resolve([]),
+    supabaseSelect('worker_document_packets', {
+      select: 'id,worker_id,template_version,signed_at,status',
+      ...packetParams,
+    }),
   ]);
   const contractors = contractorRows.map(contractorSummaryFromRow).sort(compareContractors);
   const contractorMap = Object.fromEntries(contractors.map((item) => [item.id, item]));
-  const workers = workerRows.map((row) => workerSummaryFromRow(row, contractorMap));
+  const packetMap = new Map(packetRows.map((row) => [String(row.worker_id), row]));
+  const workers = workerRows.map((row) => {
+    const packet = packetMap.get(String(row.id));
+    return {
+      ...workerSummaryFromRow(row, contractorMap),
+      documentsComplete: packet?.template_version === DOCUMENT_TEMPLATE_VERSION,
+      documentsCompletedAt: packet?.signed_at || '',
+      documentTemplateVersion: packet?.template_version || '',
+    };
+  });
   const managers = managerRows.map(managerSummaryFromRow);
   const primaryContractor = contractors.find((item) => item.companyType === 'primary') || null;
 
@@ -147,7 +172,7 @@ export async function getAdminDataFromSupabase(actor) {
 export async function createSupabaseBackup(actor) {
   if (actor?.role !== 'owner') throw new UserInputError('僅主要管理者可建立備份');
 
-  const [contractors, workers, managers, auditLogs] = await Promise.all([
+  const [contractors, workers, managers, auditLogs, documentPackets] = await Promise.all([
     supabaseSelect('contractors', {
       select: 'id,name,company_type,status,created_at,archived_at',
       order: 'created_at.asc',
@@ -164,6 +189,10 @@ export async function createSupabaseBackup(actor) {
       select: 'id,timestamp,actor_id,actor_role,actor_contractor_id,action,target_type,target_id,details',
       order: 'timestamp.asc',
     }),
+    supabaseSelect('worker_document_packets', {
+      select: 'id,worker_id,contractor_id,storage_path,sha256,template_version,signer_name,signed_at,status,created_at,superseded_at',
+      order: 'created_at.asc',
+    }),
   ]);
 
   const generatedAt = new Date().toISOString();
@@ -171,11 +200,12 @@ export async function createSupabaseBackup(actor) {
     format: '施工人員名冊 Supabase 快照 v1',
     generatedAt,
     source: 'supabase',
-    note: '管理者密碼雜湊未放入快照；照片以 photo_storage_path 對應私有 worker-photos 儲存空間。',
+    note: '管理者密碼雜湊未放入快照；照片與已簽 PDF 保存在各自的 Supabase 私有儲存空間。',
     contractors,
     workers,
     managers,
     auditLogs,
+    documentPackets,
   };
   const serialized = JSON.stringify(snapshot);
   const bytes = Buffer.from(serialized, 'utf8');
@@ -202,6 +232,7 @@ export async function createSupabaseBackup(actor) {
       workers: workers.length,
       managers: managers.length,
       auditLogs: auditLogs.length,
+      documentPackets: documentPackets.length,
     },
   };
 }
@@ -300,13 +331,25 @@ export async function createWorkerInSupabase(input, actor, source) {
 
   await assertNoDuplicateWorker(normalized, contractor.id);
   const photo = parsePhoto(input.photo);
+  const documentPacket = await parseDocumentPacket(input.documentPacket);
+  const acceptanceLog = validateDocumentAcceptance(input.documentAcceptance, normalized.name);
   const now = new Date().toISOString();
   const workerId = randomUUID();
+  const packetId = randomUUID();
   const photoPath = `${contractor.id}/${workerId}${photo.extension}`;
+  const packetPath = `${contractor.id}/${workerId}/${packetId}.pdf`;
   let photoUploaded = false;
+  let packetUploaded = false;
+  let workerInserted = false;
   try {
-    await supabaseUploadPhoto(photoPath, photo.bytes, photo.contentType);
-    photoUploaded = true;
+    const uploads = await Promise.allSettled([
+      supabaseUploadPhoto(photoPath, photo.bytes, photo.contentType)
+        .then(() => { photoUploaded = true; }),
+      supabaseUploadObject(DOCUMENT_BUCKET, packetPath, documentPacket.bytes, 'application/pdf')
+        .then(() => { packetUploaded = true; }),
+    ]);
+    const failedUpload = uploads.find((result) => result.status === 'rejected');
+    if (failedUpload) throw failedUpload.reason;
     await supabaseInsert('workers', workerRowFromInput(normalized, {
       id: workerId,
       contractor,
@@ -316,21 +359,42 @@ export async function createWorkerInSupabase(input, actor, source) {
       photoStoragePath: photoPath,
       actor,
     }), { returnRepresentation: false });
+    workerInserted = true;
+    await supabaseInsert('worker_document_packets', {
+      id: packetId,
+      worker_id: workerId,
+      contractor_id: contractor.id,
+      storage_path: packetPath,
+      sha256: documentPacket.sha256,
+      template_version: DOCUMENT_TEMPLATE_VERSION,
+      signer_name: normalized.name,
+      signed_at: acceptanceLog.signedAt,
+      acceptance_log: acceptanceLog,
+      status: 'active',
+      created_at: now,
+      superseded_at: null,
+    }, { returnRepresentation: false });
   } catch (error) {
+    if (workerInserted) {
+      try { await supabaseDelete('workers', { id: `eq.${workerId}` }); } catch (cleanupError) { console.warn(cleanupError.message); }
+    }
     if (photoUploaded) {
       try { await supabaseDeletePhoto(photoPath); } catch (cleanupError) { console.warn(cleanupError.message); }
+    }
+    if (packetUploaded) {
+      try { await supabaseDeleteObject(DOCUMENT_BUCKET, packetPath); } catch (cleanupError) { console.warn(cleanupError.message); }
     }
     throw normalizeSupabaseWriteError(error);
   }
 
-  await writeAudit(actor, 'create', 'worker', workerId, contractor.name);
-  return { receiptId: workerId, createdAt: now };
+  void writeAudit(actor, 'create', 'worker', workerId, contractor.name);
+  return { receiptId: workerId, createdAt: now, documentsComplete: true };
 }
 
 export async function updateWorkerInSupabase(input, actor) {
   const id = requireText(input.id, '人員 ID', 100);
   const existingRows = await supabaseSelect('workers', {
-    select: 'id,contractor_id,contractor_name,source,submission_id,photo_storage_path,photo_file_id,consented_at,created_at,created_by_id,created_by_name',
+    select: 'id,name,phone,job_title,contractor_id,contractor_name,source,submission_id,photo_storage_path,photo_file_id,consented_at,created_at,created_by_id,created_by_name',
     id: `eq.${id}`,
     status: 'eq.active',
     limit: '1',
@@ -350,13 +414,17 @@ export async function updateWorkerInSupabase(input, actor) {
   if (!contractor) throw new UserInputError('所選承包商不存在或已停用');
 
   const now = new Date().toISOString();
+  const documentsChanged = normalizeText(existing.name) !== normalized.name
+    || normalizePhone(existing.phone) !== normalizePhone(normalized.phone)
+    || normalizeText(existing.job_title) !== normalized.jobTitle
+    || String(existing.contractor_id) !== String(contractor.id);
   let newPhotoPath = '';
   let newPhotoUploaded = false;
   try {
     await duplicateCheck;
     if (input.photo) {
       const photo = parsePhoto(input.photo);
-      newPhotoPath = `${contractor.id}/${id}${photo.extension}`;
+      newPhotoPath = `${contractor.id}/${id}-${randomUUID()}${photo.extension}`;
       await supabaseUploadPhoto(newPhotoPath, photo.bytes, photo.contentType);
       newPhotoUploaded = true;
     }
@@ -387,8 +455,8 @@ export async function updateWorkerInSupabase(input, actor) {
     throw normalizeSupabaseWriteError(error);
   }
 
-  await writeAudit(actor, 'update', 'worker', id, contractor.name);
-  return { id, updatedAt: now };
+  void writeAudit(actor, 'update', 'worker', id, contractor.name);
+  return { id, updatedAt: now, documentsInvalidated: documentsChanged };
 }
 
 export async function deleteWorkerInSupabase(input, actor) {
@@ -429,6 +497,101 @@ export async function getWorkerPhotoFromSupabase(input, actor) {
   }
   if (worker.photo_file_id) return { legacy: true };
   throw new UserInputError('此人員沒有照片');
+}
+
+export async function saveWorkerDocumentsInSupabase(input, actor) {
+  const id = requireText(input.id, '人員 ID', 100);
+  const workerRows = await supabaseSelect('workers', {
+    select: 'id,name,contractor_id,contractor_name,updated_at',
+    id: `eq.${id}`,
+    status: 'eq.active',
+    limit: '1',
+  });
+  const worker = workerRows[0];
+  if (!worker) throw new UserInputError('找不到人員資料');
+  assertWorkerAccess(worker, actor);
+
+  if (!input.expectedUpdatedAt || new Date(input.expectedUpdatedAt).getTime() !== new Date(worker.updated_at).getTime()) {
+    throw new UserInputError('人員資料已變更，請重新整理後再簽署');
+  }
+
+  const documentPacket = await parseDocumentPacket(input.documentPacket);
+  const acceptanceLog = validateDocumentAcceptance(input.documentAcceptance, worker.name);
+  const packetId = randomUUID();
+  const packetPath = `${worker.contractor_id}/${worker.id}/${packetId}.pdf`;
+  const now = new Date().toISOString();
+  let uploaded = false;
+  try {
+    await supabaseUploadObject(DOCUMENT_BUCKET, packetPath, documentPacket.bytes, 'application/pdf');
+    uploaded = true;
+    await supabaseRpc('replace_worker_document_packet', {
+      expected_updated_at: worker.updated_at,
+      packet: {
+      id: packetId,
+      worker_id: id,
+      contractor_id: worker.contractor_id,
+      storage_path: packetPath,
+      sha256: documentPacket.sha256,
+      template_version: DOCUMENT_TEMPLATE_VERSION,
+      signer_name: worker.name,
+      signed_at: acceptanceLog.signedAt,
+      acceptance_log: acceptanceLog,
+      status: 'active',
+      created_at: now,
+      superseded_at: null,
+      },
+    });
+  } catch (error) {
+    if (uploaded) {
+      try { await supabaseDeleteObject(DOCUMENT_BUCKET, packetPath); } catch (cleanupError) { console.warn(cleanupError.message); }
+    }
+    throw normalizeSupabaseWriteError(error);
+  }
+
+  void writeAudit(actor, 'sign', 'worker_documents', id, worker.contractor_name);
+  return {
+    id,
+    documentsComplete: true,
+    documentsCompletedAt: acceptanceLog.signedAt,
+    documentTemplateVersion: DOCUMENT_TEMPLATE_VERSION,
+  };
+}
+
+export async function getWorkerDocumentPacketFromSupabase(input, actor) {
+  const id = requireText(input.id, '人員 ID', 100);
+  const workerRows = await supabaseSelect('workers', {
+    select: 'id,contractor_id',
+    id: `eq.${id}`,
+    status: 'eq.active',
+    limit: '1',
+  });
+  const worker = workerRows[0];
+  if (!worker) throw new UserInputError('找不到人員資料');
+  assertWorkerAccess(worker, actor);
+
+  const packetRows = await supabaseSelect('worker_document_packets', {
+    select: 'id,storage_path,sha256,template_version,signed_at',
+    worker_id: `eq.${id}`,
+    status: 'eq.active',
+    limit: '1',
+  });
+  const packet = packetRows[0];
+  if (!packet?.storage_path) throw new UserInputError('此人員尚未完成三份簽署文件');
+  if (packet.template_version !== DOCUMENT_TEMPLATE_VERSION) {
+    throw new UserInputError('文件版本已更新，請重新簽署');
+  }
+  return {
+    id: packet.id,
+    url: await supabaseCreateSignedObjectUrl(
+      DOCUMENT_BUCKET,
+      packet.storage_path,
+      DOCUMENT_LINK_TTL_SECONDS,
+    ),
+    sha256: packet.sha256,
+    templateVersion: packet.template_version,
+    signedAt: packet.signed_at,
+    expiresAt: new Date(Date.now() + DOCUMENT_LINK_TTL_SECONDS * 1000).toISOString(),
+  };
 }
 
 export async function syncBundleToSupabase(bundle) {
@@ -799,6 +962,75 @@ function parsePhoto(value) {
     contentType: isPng ? 'image/png' : 'image/jpeg',
     extension: isPng ? '.png' : '.jpg',
   };
+}
+
+async function parseDocumentPacket(value) {
+  const source = String(value || '');
+  if (source.length > DOCUMENT_PACKET_MAX_CHARACTERS) {
+    throw new UserInputError('三份簽署文件檔案過大，請重新簽署後再試');
+  }
+  const match = source.match(/^data:application\/pdf;base64,([A-Za-z0-9+/=]+)$/i);
+  if (!match) throw new UserInputError('三份簽署文件格式不正確');
+  const bytes = Buffer.from(match[1], 'base64');
+  if (bytes.length < 8 || bytes.length > DOCUMENT_PACKET_MAX_BYTES
+    || bytes.subarray(0, 5).toString('ascii') !== '%PDF-') {
+    throw new UserInputError('三份簽署文件內容不正確或檔案過大');
+  }
+  try {
+    const pdf = await PDFDocument.load(bytes);
+    if (pdf.getPageCount() !== 3) {
+      throw new UserInputError('簽署文件必須完整包含三頁');
+    }
+  } catch (error) {
+    if (error instanceof UserInputError) throw error;
+    throw new UserInputError('三份簽署文件無法讀取，請重新簽署');
+  }
+  return {
+    bytes,
+    sha256: createHash('sha256').update(bytes).digest('hex'),
+  };
+}
+
+function validateDocumentAcceptance(value, workerName) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new UserInputError('請完成三份文件閱讀與簽署');
+  }
+  if (value.templateVersion !== DOCUMENT_TEMPLATE_VERSION) {
+    throw new UserInputError('文件版本已更新，請重新閱讀並簽署');
+  }
+  const signedAt = validateRecentTimestamp(value.signedAt, '簽署時間');
+  const documents = {};
+  for (const type of ['privacy', 'health', 'safety']) {
+    const item = value.documents?.[type];
+    if (!item || item.accepted !== true) {
+      throw new UserInputError('請完成三份文件閱讀與同意');
+    }
+    const viewedAt = validateRecentTimestamp(item.viewedAt, '文件閱讀時間');
+    const acceptedAt = validateRecentTimestamp(item.acceptedAt, '文件同意時間');
+    if (new Date(acceptedAt).getTime() < new Date(viewedAt).getTime()
+      || new Date(signedAt).getTime() < new Date(acceptedAt).getTime()) {
+      throw new UserInputError('文件閱讀與同意時間不正確');
+    }
+    documents[type] = { viewedAt, acceptedAt, accepted: true };
+  }
+  return {
+    templateVersion: DOCUMENT_TEMPLATE_VERSION,
+    signerName: String(workerName || '').trim(),
+    signedAt,
+    documents,
+  };
+}
+
+function validateRecentTimestamp(value, label) {
+  const date = new Date(value);
+  const timestamp = date.getTime();
+  const now = Date.now();
+  if (!Number.isFinite(timestamp)
+    || timestamp < now - 24 * 60 * 60 * 1000
+    || timestamp > now + 10 * 60 * 1000) {
+    throw new UserInputError(`${label}不正確，請重新簽署`);
+  }
+  return date.toISOString();
 }
 
 function validateIdNumber(value) {
