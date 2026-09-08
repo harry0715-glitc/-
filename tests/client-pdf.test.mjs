@@ -4,6 +4,7 @@ import test from 'node:test';
 import { PDFDocument } from 'pdf-lib';
 
 import { coverDimensions, createRosterPdf } from '../client-pdf.mjs';
+import { mergeRosterAndDocumentPackets } from '../worker-documents.mjs';
 
 const ONE_PIXEL_PNG = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=';
 
@@ -53,4 +54,38 @@ test('browser PDF generator creates a Chinese roster without a server round trip
   const parsed = await PDFDocument.load(bytes);
   assert.equal(parsed.getPageCount(), 4);
   assert.ok(Date.now() - startedAt < 20_000, '10-person PDF should finish well below the old server timeout');
+});
+
+test('single worker complete export contains one roster page followed by three signed pages', async () => {
+  const fontBytes = await readFile(new URL('../netlify/functions/assets/NotoSansTC-VF.ttf', import.meta.url));
+  const worker = {
+    name: '單一測試人員',
+    idNumber: 'A123456789',
+    phone: '0912345678',
+    emergencyContact: '緊急聯絡人',
+    emergencyPhone: '0987654321',
+    bloodType: 'O',
+    jobTitle: '施工人員',
+    contractorName: '測試次承包商',
+    companyType: 'subcontractor',
+    entryDate: '2026-09-08',
+    createdAt: '2026-09-08T01:00:00.000Z',
+    updatedAt: '2026-09-08T01:00:00.000Z',
+  };
+  const roster = await createRosterPdf({
+    primaryContractorName: '楓根室內裝修設計有限公司',
+    reportName: '單一人員完整資料',
+    scopeLabel: '次承包商：測試次承包商',
+    dataBasis: '人員：單一測試人員',
+    workers: [worker],
+    photos: [ONE_PIXEL_PNG],
+  }, { fontBytes });
+  const signedPacket = await PDFDocument.create();
+  for (let index = 0; index < 3; index += 1) signedPacket.addPage([595.28, 841.89]);
+  const complete = await mergeRosterAndDocumentPackets(
+    roster,
+    [new Blob([await signedPacket.save()], { type: 'application/pdf' })]
+  );
+  const parsed = await PDFDocument.load(await complete.arrayBuffer());
+  assert.equal(parsed.getPageCount(), 4);
 });

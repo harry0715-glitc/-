@@ -158,6 +158,38 @@ const mapWithConcurrency = async (items, limit, callback) => {
   return results;
 };
 
+const loadWorkerPdfAssets = async (worker, adminCall) => {
+  const [photoResult, packet] = await Promise.all([
+    adminCall('adminGetPhoto', { id: worker.id }),
+    adminCall('adminGetDocumentPacket', { id: worker.id })
+  ]);
+  if (!photoResult?.dataUrl) throw new Error(`「${worker.name}」的照片讀取失敗，請重新上傳照片`);
+  if (!packet?.dataUrl) throw new Error(`「${worker.name}」的簽署文件讀取失敗`);
+  const documentPacket = dataUrlToBlob(packet.dataUrl);
+  if (documentPacket.size < 8) throw new Error(`「${worker.name}」的簽署文件內容不完整`);
+  const hash = await crypto.subtle.digest('SHA-256', await documentPacket.arrayBuffer());
+  const actualHash = Array.from(
+    new Uint8Array(hash),
+    (value) => value.toString(16).padStart(2, '0')
+  ).join('');
+  if (actualHash !== packet.sha256) {
+    throw new Error(`「${worker.name}」的簽署文件驗證失敗，已停止匯出`);
+  }
+  return { photo: photoResult.dataUrl, documentPacket };
+};
+
+const downloadPdfBlob = (blob, filename) => {
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = filename;
+  link.style.display = 'none';
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 60_000);
+};
+
 const contractorLevelLabel = (contractor) =>
   contractor?.companyType === 'primary' ? '主承包商' : '次承包商';
 
@@ -1781,6 +1813,7 @@ function WorkersTab({ data, showToast, adminCall, refresh }) {
   const [photo, setPhoto] = useState('');
   const [photoLoading, setPhotoLoading] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [exportingWorkerId, setExportingWorkerId] = useState('');
   const owner = data.profile.role === 'owner';
 
   const filtered = useMemo(() => {
@@ -1929,7 +1962,43 @@ function WorkersTab({ data, showToast, adminCall, refresh }) {
                 <h2 className="text-2xl font-black text-white">{selected.name}</h2>
                 <p className="mt-1 text-sm text-orange-400">{selected.jobTitle}</p>
               </div>
-              <div className="flex gap-2">
+              <div className="flex flex-wrap justify-end gap-2">
+                <button
+                  onClick={async () => {
+                    if (!selected.documentsComplete) {
+                      showToast('請先完成三份文件簽署', 'error');
+                      return;
+                    }
+                    setExportingWorkerId(selected.id);
+                    try {
+                      const { photo: exportPhoto, documentPacket } = await loadWorkerPdfAssets(selected, adminCall);
+                      const { createRosterPdf } = await import('./client-pdf.mjs');
+                      const rosterBlob = await createRosterPdf({
+                        primaryContractorName: data.primaryContractor?.name,
+                        reportName: '單一人員完整資料',
+                        scopeLabel: `${selected.companyLevelLabel || contractorLevelLabel(selected)}：${selected.contractorName}`,
+                        dataBasis: `人員：${selected.name}｜資料截至：${new Date().toLocaleString('zh-TW')}`,
+                        workers: [selected],
+                        photos: [exportPhoto]
+                      });
+                      const blob = await mergeRosterAndDocumentPackets(rosterBlob, [documentPacket]);
+                      const filename = `${data.primaryContractor?.name || '主承包商'}_施工人員完整資料_${selected.contractorName}_${selected.name}.pdf`;
+                      downloadPdfBlob(blob, filename);
+                      showToast('單一人員完整 PDF 已產生');
+                    } catch (error) {
+                      showToast(`產生失敗：${error.message}`, 'error');
+                    } finally {
+                      setExportingWorkerId('');
+                    }
+                  }}
+                  disabled={exportingWorkerId === selected.id}
+                  className="flex items-center gap-2 rounded-lg border border-emerald-800 px-4 py-2.5 text-sm font-bold text-emerald-400 disabled:opacity-60"
+                >
+                  {exportingWorkerId === selected.id
+                    ? <LoaderCircle className="h-4 w-4 animate-spin" />
+                    : <Download className="h-4 w-4" />}
+                  {exportingWorkerId === selected.id ? '產生中' : '匯出完整 PDF'}
+                </button>
                 <button
                   onClick={() => setSigning(selected)}
                   className={`flex items-center gap-2 rounded-lg border px-4 py-2.5 text-sm font-bold ${selected.documentsComplete ? 'border-zinc-700 text-zinc-300' : 'border-cyan-700 text-cyan-300'}`}
@@ -2410,23 +2479,13 @@ function ReportsTab({ data, showToast, adminCall }) {
         const remaining = missingDocuments.length > 5 ? `等 ${missingDocuments.length} 人` : '';
         throw new Error(`請先完成簽署文件：${names}${remaining}`);
       }
-      const [photos, documentPackets] = await Promise.all([
-        mapWithConcurrency(workers, 4, async (worker) => {
-          const photo = await adminCall('adminGetPhoto', { id: worker.id });
-          if (!photo?.dataUrl) throw new Error(`「${worker.name}」的照片讀取失敗，請重新上傳照片`);
-          return photo.dataUrl;
-        }),
-        mapWithConcurrency(workers, 4, async (worker) => {
-          const packet = await adminCall('adminGetDocumentPacket', { id: worker.id });
-          if (!packet?.dataUrl) throw new Error(`「${worker.name}」的簽署文件讀取失敗`);
-          const blob = dataUrlToBlob(packet.dataUrl);
-          if (blob.size < 8) throw new Error(`「${worker.name}」的簽署文件內容不完整`);
-          const hash = await crypto.subtle.digest('SHA-256', await blob.arrayBuffer());
-          const actualHash = Array.from(new Uint8Array(hash), (value) => value.toString(16).padStart(2, '0')).join('');
-          if (actualHash !== packet.sha256) throw new Error(`「${worker.name}」的簽署文件驗證失敗，已停止匯出`);
-          return blob;
-        }),
-      ]);
+      const assets = await mapWithConcurrency(
+        workers,
+        4,
+        (worker) => loadWorkerPdfAssets(worker, adminCall)
+      );
+      const photos = assets.map((item) => item.photo);
+      const documentPackets = assets.map((item) => item.documentPacket);
       const scopeLabel = type === 'daily'
         ? (owner ? '全部公司（含主承包商與次承包商）' : `次承包商：${data.profile.contractorName}`)
         : (selectedContractor?.companyType === 'primary'
