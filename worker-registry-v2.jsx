@@ -386,6 +386,11 @@ function CameraOpenHelp({ open, onClose, showToast }) {
 }
 
 function PhotoCropper({ src, onCancel, onDone, showToast }) {
+  const [checking, setChecking] = useState(false);
+  const [qualityError, setQualityError] = useState('');
+  const checkAttempt = useRef(0);
+  const checkBusy = useRef(false);
+  useEffect(() => () => { checkAttempt.current += 1; }, []);
   const [crop, setCrop] = useState({ scale: 1.08, x: 0, y: 0 });
   const [metrics, setMetrics] = useState(null);
   const frameRef = useRef(null);
@@ -420,6 +425,8 @@ function PhotoCropper({ src, onCancel, onDone, showToast }) {
   });
 
   const startGesture = (event) => {
+    if (checkBusy.current) return;
+    setQualityError('');
     if (event.touches?.length >= 2) {
       const center = midpoint(event.touches[0], event.touches[1]);
       gestureRef.current = {
@@ -442,6 +449,7 @@ function PhotoCropper({ src, onCancel, onDone, showToast }) {
   };
 
   const moveGesture = (event) => {
+    if (checkBusy.current) return;
     const gesture = gestureRef.current;
     if (!gesture) return;
     if (event.cancelable) event.preventDefault();
@@ -465,12 +473,34 @@ function PhotoCropper({ src, onCancel, onDone, showToast }) {
   };
 
   const finish = async () => {
+    if (checkBusy.current || !metrics) return;
+    checkBusy.current = true;
+    gestureRef.current = null;
+    setChecking(true);
+    setQualityError('');
+    const attempt = ++checkAttempt.current;
+    let timer;
     try {
       const rect = frameRef.current?.getBoundingClientRect();
-      onDone(await cropImage(src, crop, rect));
-      showToast('照片已裁切');
+      const cropped = await cropImage(src, crop, rect);
+      const result = await Promise.race([
+        import('./photo-quality.mjs').then(({ inspectPhoto }) => inspectPhoto(cropped)),
+        new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('timeout')), 30000); }),
+      ]);
+      if (attempt !== checkAttempt.current) return;
+      if (!result.ok) { setQualityError(result.message); return; }
+      onDone(cropped);
+      showToast('照片初步檢查通過');
     } catch {
-      showToast('照片裁切失敗，請重新選取', 'error');
+      if (attempt === checkAttempt.current) {
+        setQualityError('照片檢查未完成，請確認網路後重試；若持續失敗，請使用 Chrome 或 Safari 開啟');
+      }
+    } finally {
+      clearTimeout(timer);
+      if (attempt === checkAttempt.current) {
+        checkBusy.current = false;
+        setChecking(false);
+      }
     }
   };
 
@@ -496,6 +526,8 @@ function PhotoCropper({ src, onCancel, onDone, showToast }) {
             onMouseLeave={() => { gestureRef.current = null; }}
             onWheel={(event) => {
               event.preventDefault();
+              if (checkBusy.current) return;
+              setQualityError('');
               setCrop((current) => clampCrop({
                 ...current,
                 scale: current.scale + (event.deltaY > 0 ? -0.07 : 0.07)
@@ -538,9 +570,10 @@ function PhotoCropper({ src, onCancel, onDone, showToast }) {
       </div>
 
       <footer className="border-t border-zinc-800 bg-zinc-950 p-4 pb-[max(1rem,env(safe-area-inset-bottom))]">
-        <button type="button" onClick={finish} className="flex w-full items-center justify-center gap-2 rounded-lg bg-orange-600 px-4 py-3.5 font-bold text-white">
-          <Check className="h-5 w-5" />
-          確認裁切
+        {qualityError && <p role="alert" className="mb-3 text-sm text-red-400">{qualityError}</p>}
+        <button type="button" onClick={finish} disabled={checking || !metrics} aria-busy={checking} className="flex w-full items-center justify-center gap-2 rounded-lg bg-orange-600 px-4 py-3.5 font-bold text-white disabled:opacity-60">
+          {checking ? <LoaderCircle className="h-5 w-5 animate-spin" /> : <Check className="h-5 w-5" />}
+          {checking ? '正在檢查照片…' : qualityError ? '重新檢查照片' : '確認裁切'}
         </button>
       </footer>
     </div>
